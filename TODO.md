@@ -84,11 +84,18 @@
 
 # M1 — 最小对话闭环
 
-## T06 `[TODO]` 钉钉 Stream 接入与消息归一化
+## [DONE] T06 钉钉 Stream 接入与消息归一化
 - `adapters/dingtalk/stream.py`:用 `dingtalk-stream` SDK 建 WebSocket 连接,注册机器人消息回调(chatbot callback)。
 - `adapters/dingtalk/message.py`:定义 `InboundMessage` dataclass(`text`、`sender_staff_id`、`sender_nick`、`conversation_type`(1单聊/2群聊)、`conversation_id`、`open_conversation_id`、`session_webhook`、`msg_id`);把 SDK 回调体归一化成它。
 - 回调里先只做:归一化 → 打日志 → 交给一个 `on_message(InboundMessage)` 回调(下一任务接 LLM)。
 - **验收**:私聊机器人 / 群里 @机器人,服务端日志能打印出归一化后的 `InboundMessage`,字段正确。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/adapters/dingtalk/message.py`,实现 `InboundMessage`、`MessageNormalizationError` 与 SDK/raw callback 到归一化消息的转换,覆盖文本、发送者、会话、webhook 和消息 ID 字段校验。
+  - 已新增 `src/adapters/dingtalk/stream.py`,用 `dingtalk-stream` SDK 创建 Stream client,注册 `ChatbotMessage.TOPIC` 回调,在回调中归一化、结构化记录 `dingtalk_inbound_message`,再交给异步 `on_message(InboundMessage)`。
+  - 已为 `python -m src.main` 增加可选 `--stream` 接收模式;默认无参数启动仍不依赖本地 `.env`,便于 smoke 检查。
+  - 已补充单测覆盖归一化成功、必填字段缺失、非文本拒绝、单聊 `openConversationId` 兼容、SDK topic 注册和 invalid callback ACK。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python -m src.main --help`。
+  - 当前环境无真实钉钉 `.env`/Stream 连接凭据,未执行私聊机器人和群 @ 机器人的外部人工验证;`--stream` 路径已就绪,具备凭据和应用 Stream 配置后可直接观察归一化日志。
 
 ## T07 `[TODO]` 触发判定与出站封装
 - `adapters/dingtalk/outbound.py`:`async reply(inbound, text)` —— 优先用 `session_webhook`(未过期)否则回退 OpenAPI(单聊 `send_oto`、群聊 `send_group`,按 `conversation_type` 选)。

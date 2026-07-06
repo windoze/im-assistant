@@ -24,6 +24,16 @@ Run the current skeleton entry point:
 python -m src.main
 ```
 
+Run the DingTalk Stream receiver and log normalized inbound chatbot messages. This requires a
+populated `.env` with DingTalk app credentials and an app configured for Stream mode:
+
+```bash
+python -m src.main --stream
+```
+
+When a user privately messages the bot or @mentions it in a group, the service logs a normalized
+`InboundMessage` with sender, conversation, webhook, and message identifiers.
+
 Run tests:
 
 ```bash
