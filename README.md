@@ -31,8 +31,9 @@ populated `.env` with DingTalk app credentials and an app configured for Stream 
 python -m src.main --stream
 ```
 
-When a user privately messages the bot or @mentions it in a group, the service logs a normalized
-`InboundMessage` with sender, conversation, webhook, and message identifiers.
+When a user privately messages the bot or @mentions it in a group, the service logs the normalized
+inbound event and replies with fixed text through `sessionWebhook` when it is still valid, otherwise
+through DingTalk OpenAPI. Non-text messages receive `暂只支持文本`.
 
 Run tests:
 

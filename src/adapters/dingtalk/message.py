@@ -26,6 +26,26 @@ class InboundMessage:
     open_conversation_id: str
     session_webhook: str
     msg_id: str
+    session_webhook_expired_time: int | None = None
+    message_type: str = "text"
+
+
+@dataclass(frozen=True, slots=True)
+class UnsupportedInboundMessage:
+    """Inbound message metadata for content types the assistant cannot process yet."""
+
+    message_type: str
+    sender_staff_id: str
+    sender_nick: str
+    conversation_type: int
+    conversation_id: str
+    open_conversation_id: str
+    session_webhook: str
+    msg_id: str
+    session_webhook_expired_time: int | None = None
+
+
+InboundEvent = InboundMessage | UnsupportedInboundMessage
 
 
 def normalize_chatbot_callback(
@@ -37,13 +57,28 @@ def normalize_chatbot_callback(
     return normalize_chatbot_message(chatbot_message)
 
 
+def normalize_chatbot_event(
+    source: CallbackMessage | ChatbotMessage | Mapping[str, Any],
+) -> InboundEvent:
+    """Convert a DingTalk callback into text or unsupported inbound metadata."""
+
+    chatbot_message = _coerce_chatbot_message(source)
+    return normalize_chatbot_message_event(chatbot_message)
+
+
 def normalize_chatbot_message(message: ChatbotMessage) -> InboundMessage:
     """Convert an SDK chatbot message into the stable application message shape."""
 
-    message_type = _required_string(_message_value(message, "message_type", "msgtype"), "msgtype")
-    if message_type != "text":
-        raise MessageNormalizationError(f"Unsupported DingTalk message type: {message_type}")
+    event = normalize_chatbot_message_event(message)
+    if isinstance(event, InboundMessage):
+        return event
+    raise MessageNormalizationError(f"Unsupported DingTalk message type: {event.message_type}")
 
+
+def normalize_chatbot_message_event(message: ChatbotMessage) -> InboundEvent:
+    """Convert an SDK chatbot message into text or unsupported inbound metadata."""
+
+    message_type = _required_string(_message_value(message, "message_type", "msgtype"), "msgtype")
     conversation_type = _required_conversation_type(
         _message_value(message, "conversation_type", "conversationType")
     )
@@ -52,25 +87,40 @@ def normalize_chatbot_message(message: ChatbotMessage) -> InboundMessage:
         "conversationId",
     )
     open_conversation_id = _open_conversation_id(message, conversation_type, conversation_id)
-
-    return InboundMessage(
-        text=_required_text(message),
-        sender_staff_id=_required_string(
+    common = {
+        "sender_staff_id": _required_string(
             _message_value(message, "sender_staff_id", "senderStaffId"),
             "senderStaffId",
         ),
-        sender_nick=_required_string(
+        "sender_nick": _required_string(
             _message_value(message, "sender_nick", "senderNick"),
             "senderNick",
         ),
-        conversation_type=conversation_type,
-        conversation_id=conversation_id,
-        open_conversation_id=open_conversation_id,
-        session_webhook=_required_string(
+        "conversation_type": conversation_type,
+        "conversation_id": conversation_id,
+        "open_conversation_id": open_conversation_id,
+        "session_webhook": _required_string(
             _message_value(message, "session_webhook", "sessionWebhook"),
             "sessionWebhook",
         ),
-        msg_id=_required_string(_message_value(message, "message_id", "msgId"), "msgId"),
+        "msg_id": _required_string(_message_value(message, "message_id", "msgId"), "msgId"),
+        "session_webhook_expired_time": _optional_positive_int(
+            _message_value(
+                message,
+                "session_webhook_expired_time",
+                "sessionWebhookExpiredTime",
+            ),
+            "sessionWebhookExpiredTime",
+        ),
+    }
+
+    if message_type != "text":
+        return UnsupportedInboundMessage(message_type=message_type, **common)
+
+    return InboundMessage(
+        text=_required_text(message),
+        message_type=message_type,
+        **common,
     )
 
 
@@ -165,4 +215,19 @@ def _required_conversation_type(value: Any) -> int:
         value = int(value)
     if value not in (1, 2):
         raise MessageNormalizationError("DingTalk conversationType must be 1 or 2")
+    return value
+
+
+def _optional_positive_int(value: Any, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise MessageNormalizationError(f"DingTalk {field_name} must be a positive integer")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped.isdecimal():
+            raise MessageNormalizationError(f"DingTalk {field_name} must be a positive integer")
+        value = int(stripped)
+    if not isinstance(value, int) or value <= 0:
+        raise MessageNormalizationError(f"DingTalk {field_name} must be a positive integer")
     return value

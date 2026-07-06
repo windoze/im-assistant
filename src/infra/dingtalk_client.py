@@ -311,6 +311,12 @@ class DingTalkClient:
 
 
 def _parse_response(response: httpx.Response, *, method: str, path: str) -> Any:
+    return parse_dingtalk_response(response, method=method, path=path)
+
+
+def parse_dingtalk_response(response: httpx.Response, *, method: str, path: str) -> Any:
+    """Parse DingTalk HTTP responses and raise structured API errors."""
+
     payload = _json_payload(response, method=method, path=path)
     errcode, errmsg = _api_error(payload)
     if response.is_error or errcode is not None:

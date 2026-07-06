@@ -97,10 +97,17 @@
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python -m src.main --help`。
   - 当前环境无真实钉钉 `.env`/Stream 连接凭据,未执行私聊机器人和群 @ 机器人的外部人工验证;`--stream` 路径已就绪,具备凭据和应用 Stream 配置后可直接观察归一化日志。
 
-## T07 `[TODO]` 触发判定与出站封装
+## [DONE] T07 触发判定与出站封装
 - `adapters/dingtalk/outbound.py`:`async reply(inbound, text)` —— 优先用 `session_webhook`(未过期)否则回退 OpenAPI(单聊 `send_oto`、群聊 `send_group`,按 `conversation_type` 选)。
 - 触发判定(架构 §8.2):单聊直接触发;群聊钉钉只回调 @ 消息,直接视为触发。把非文本消息类型先记录并回一句"暂只支持文本"。
 - **验收**:能把一段固定文本正确回到来源会话(单聊和群聊各验证一次)。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/adapters/dingtalk/outbound.py`,实现 `DingTalkOutbound.reply()` 和模块级 `reply(...)`,优先使用未过期 `sessionWebhook`,否则按 `conversation_type` 回退单聊 `send_oto()` 或群聊 `send_group()`。
+  - 已扩展入站归一化以保留 `sessionWebhookExpiredTime`,并为非文本消息生成可回复的 `UnsupportedInboundMessage` 元数据;Stream 不再把非文本消息直接拒为 bad request。
+  - 已新增触发判定,单聊消息和群聊 @ 回调直接进入处理;当前 T07 阶段对文本消息回复固定文本 `收到`,非文本消息记录类型并回复 `暂只支持文本`。
+  - 已补充单测覆盖 webhook 优先、单聊/群聊 OpenAPI 回退、非文本归一化与 Stream 分发、运行时固定回复和不支持消息回复;README 已更新 Stream 行为说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python -m src.main --help`。
+  - 当前环境无真实钉钉 `.env`/Stream 连接凭据,未执行单聊和群聊外部人工发送验证;相关发送路径已由 mock HTTP 测试覆盖,具备凭据和 Stream 配置后可用 `python -m src.main --stream` 验证。
 
 ## T08 `[TODO]` 接入 Claude,一问一答
 - `infra/llm.py`:`LLMClient`,封装 Anthropic SDK;`async complete(system, messages) -> str`;模型从配置读(默认 `claude-sonnet-5`);超时与错误处理。

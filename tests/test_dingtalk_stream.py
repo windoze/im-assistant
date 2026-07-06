@@ -10,9 +10,12 @@ from dingtalk_stream import AckMessage, CallbackMessage, ChatbotHandler, Chatbot
 from dingtalk_stream import Credential as StreamCredential
 
 from src.adapters.dingtalk.message import (
+    InboundEvent,
     InboundMessage,
     MessageNormalizationError,
+    UnsupportedInboundMessage,
     normalize_chatbot_callback,
+    normalize_chatbot_event,
 )
 from src.adapters.dingtalk.stream import DingTalkStreamAdapter
 from src.infra.config import DingTalkConfig
@@ -91,13 +94,36 @@ def test_normalize_chatbot_callback_rejects_non_text_message() -> None:
         normalize_chatbot_callback(payload)
 
 
+def test_normalize_chatbot_event_returns_unsupported_non_text_metadata() -> None:
+    payload = _payload(
+        msgtype="picture",
+        content={"downloadCode": "image-1"},
+        sessionWebhookExpiredTime="2000",
+    )
+    payload.pop("text")
+
+    inbound = normalize_chatbot_event(payload)
+
+    assert inbound == UnsupportedInboundMessage(
+        message_type="picture",
+        sender_staff_id="user-1",
+        sender_nick="Alice",
+        conversation_type=2,
+        conversation_id="conversation-1",
+        open_conversation_id="open-conversation-1",
+        session_webhook="https://webhook.example.com/session",
+        msg_id="msg-1",
+        session_webhook_expired_time=2000,
+    )
+
+
 @pytest.mark.asyncio
 async def test_stream_adapter_registers_chatbot_topic_and_dispatches_message(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    received: list[InboundMessage] = []
+    received: list[InboundEvent] = []
 
-    async def on_message(message: InboundMessage) -> None:
+    async def on_message(message: InboundEvent) -> None:
         received.append(message)
 
     adapter = DingTalkStreamAdapter(_config(), on_message, client_factory=FakeStreamClient)
@@ -133,9 +159,9 @@ async def test_stream_adapter_registers_chatbot_topic_and_dispatches_message(
 
 @pytest.mark.asyncio
 async def test_stream_adapter_returns_bad_request_for_invalid_callback() -> None:
-    received: list[InboundMessage] = []
+    received: list[InboundEvent] = []
 
-    async def on_message(message: InboundMessage) -> None:
+    async def on_message(message: InboundEvent) -> None:
         received.append(message)
 
     adapter = DingTalkStreamAdapter(_config(), on_message, client_factory=FakeStreamClient)
@@ -147,6 +173,37 @@ async def test_stream_adapter_returns_bad_request_for_invalid_callback() -> None
     assert code == AckMessage.STATUS_BAD_REQUEST
     assert "DingTalk" in message
     assert received == []
+
+
+@pytest.mark.asyncio
+async def test_stream_adapter_dispatches_unsupported_non_text_message() -> None:
+    received: list[InboundEvent] = []
+
+    async def on_message(message: InboundEvent) -> None:
+        received.append(message)
+
+    adapter = DingTalkStreamAdapter(_config(), on_message, client_factory=FakeStreamClient)
+    client = adapter.create_client()
+    handler = client.handlers[ChatbotMessage.TOPIC]
+    payload = _payload(msgtype="picture", content={"downloadCode": "image-1"})
+    payload.pop("text")
+
+    code, message = await handler.process(_callback(payload))
+
+    assert code == AckMessage.STATUS_OK
+    assert message == "ok"
+    assert received == [
+        UnsupportedInboundMessage(
+            message_type="picture",
+            sender_staff_id="user-1",
+            sender_nick="Alice",
+            conversation_type=2,
+            conversation_id="conversation-1",
+            open_conversation_id="open-conversation-1",
+            session_webhook="https://webhook.example.com/session",
+            msg_id="msg-1",
+        )
+    ]
 
 
 class FakeStreamClient:

@@ -15,16 +15,16 @@ from dingtalk_stream import (
 from dingtalk_stream import Credential as StreamCredential
 
 from src.adapters.dingtalk.message import (
-    InboundMessage,
+    InboundEvent,
     MessageNormalizationError,
-    normalize_chatbot_callback,
+    normalize_chatbot_event,
 )
 from src.infra.config import DingTalkConfig
 from src.infra.log import get_logger
 
 logger = get_logger(__name__)
 
-OnMessage = Callable[[InboundMessage], Awaitable[None]]
+OnMessage = Callable[[InboundEvent], Awaitable[None]]
 
 
 class StreamClient(Protocol):
@@ -86,7 +86,7 @@ class DingTalkChatbotCallbackHandler(ChatbotHandler):
         """Normalize, log, and dispatch one DingTalk chatbot callback."""
 
         try:
-            inbound = normalize_chatbot_callback(message)
+            inbound = normalize_chatbot_event(message)
         except MessageNormalizationError as exc:
             logger.warning("dingtalk_inbound_message_invalid", extra={"error": str(exc)})
             return AckMessage.STATUS_BAD_REQUEST, str(exc)
@@ -97,6 +97,7 @@ class DingTalkChatbotCallbackHandler(ChatbotHandler):
                 "msg_id": inbound.msg_id,
                 "sender_staff_id": inbound.sender_staff_id,
                 "sender_nick": inbound.sender_nick,
+                "message_type": inbound.message_type,
                 "conversation_type": inbound.conversation_type,
                 "conversation_id": inbound.conversation_id,
                 "open_conversation_id": inbound.open_conversation_id,
