@@ -50,7 +50,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
         return
 
     from src.adapters.dingtalk import DingTalkOutbound, DingTalkStreamAdapter
-    from src.core import SessionManager
+    from src.core import SessionInboxDispatcher, SessionManager
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
     from src.infra.llm import LLMClient
@@ -66,7 +66,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
             async with DingTalkOutbound(dingtalk_client) as outbound:
                 async with LLMClient(app_config.llm) as llm_client:
 
-                    async def on_event(event: InboundEvent) -> None:
+                    async def process_event(event: InboundEvent) -> None:
                         await handle_inbound_event(
                             event,
                             outbound=outbound,
@@ -74,7 +74,15 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                             session_manager=session_manager,
                         )
 
-                    await DingTalkStreamAdapter(app_config.dingtalk, on_event).start()
+                    inbox_dispatcher = SessionInboxDispatcher(process_event)
+
+                    async def on_event(event: InboundEvent) -> None:
+                        await inbox_dispatcher.enqueue(event)
+
+                    try:
+                        await DingTalkStreamAdapter(app_config.dingtalk, on_event).start()
+                    finally:
+                        await inbox_dispatcher.close()
 
 
 async def handle_inbound_event(

@@ -36,6 +36,8 @@ persistent Session for that DingTalk conversation, sends the text to Claude with
 enterprise-assistant system prompt, and replies through `sessionWebhook` when it is still valid,
 otherwise through DingTalk OpenAPI. The first group @mention activates that group Session and sends
 a welcome message before normal handling continues. Non-text messages receive `暂只支持文本`.
+Inbound Stream events are queued by Session, so messages in the same DingTalk conversation are
+processed strictly in order while different conversations can continue in parallel.
 
 On Stream startup the service idempotently initializes the SQLite database configured by
 `storage.database_path` with tables for sessions, message history, identity bindings, audit logs,

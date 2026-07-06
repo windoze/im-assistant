@@ -159,10 +159,15 @@
   - 已补充单测覆盖同一会话命中同一 Session、群聊 actor 随发送者变化、首次群激活欢迎语路由;README 已更新 Session runtime 行为说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
-## T12 `[TODO]` per-session 串行 inbox
+## [DONE] T12 per-session 串行 inbox
 - `core/inbox.py`:每个 Session 一个 asyncio 队列 + 单 worker 协程,消息**依次**处理不并发(架构 §8.1)。
 - 全局调度:`on_message` 改为"入队到对应 session 的 inbox";worker 取出后走处理流程。
 - **验收**:对同一会话快速连发 3 条,日志显示严格串行处理;不同会话可并行。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/core/inbox.py`,实现按 DingTalk `conversation_id` 分配的 per-session FIFO inbox,每个 Session 仅启动一个 worker 协程并记录开始/结束结构化日志。
+  - 已将 Stream 入口改为先入队到 `SessionInboxDispatcher`,worker 再执行既有触发判定、Session 路由、欢迎语、非文本回复和 LLM 回复流程;同一会话串行,不同会话可并行。
+  - 已补充单测覆盖同一会话快速 3 条消息严格 FIFO 串行处理、不同会话处理可并行;README 已补充 inbox 调度行为。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T13 `[TODO]` 多轮上下文与 agent loop 骨架
 - `core/agent_loop.py`:维护对话历史(从 `messages` 表加载/追加);`async run(session, user_text)`:组装历史 → LLM → 回复 → 存历史。
