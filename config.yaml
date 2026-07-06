@@ -1,0 +1,12 @@
+llm:
+  model: claude-sonnet-5
+
+session:
+  confirm_timeout_sec: 1800
+
+dingtalk:
+  api_base: https://api.dingtalk.com
+  legacy_api_base: https://oapi.dingtalk.com
+
+logging:
+  level: INFO

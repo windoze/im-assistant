@@ -13,6 +13,8 @@ DingTalk OpenAPI calls, Claude responses, SQLite state, and encrypted user token
    ```
 
 3. Copy `.env.example` to `.env` and fill in the DingTalk and Anthropic values.
+4. Adjust non-secret settings such as the Claude model, DingTalk API base URL, session timeout,
+   and log level in `config.yaml` when needed.
 
 ## Usage
 

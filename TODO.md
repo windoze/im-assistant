@@ -32,11 +32,16 @@
   - 已创建 PLAN.md §3 要求的 Python 包目录、`__init__.py`、`src/main.py` 异步入口、依赖元数据、环境变量示例、忽略规则、README 和最小 smoke test。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`python -m src.main`、`.venv/bin/pytest`。
 
-## T02 `[TODO]` 配置加载与日志基础设施
+## [DONE] T02 配置加载与日志基础设施
 - `infra/config.py`:`load_config()` 合并 `.env`(dotenv)+ `config.yaml`,返回带类型的配置对象(dataclass);缺必填项报清晰错误。
 - `config.yaml`:含 `llm.model`(默认 `claude-sonnet-5`)、`session.confirm_timeout_sec: 1800`、`dingtalk.api_base`、日志级别等非密钥项。
 - `infra/log.py`:结构化日志(JSON 行或 key=value),提供 `get_logger(name)`。
 - **验收**:单测覆盖"缺失必填项报错""正常加载";`get_logger` 可用。
+- **完成记录(2026-07-07)**:
+  - 已实现 `src/infra/config.py` typed dataclass 配置加载,合并 `.env` 与 `config.yaml`,缺少必填密钥时报告具体变量名。
+  - 已新增默认 `config.yaml` 非密钥配置,实现 `src/infra/log.py` JSON 行结构化日志与 `get_logger(name)`,并将入口日志切换到该基础设施。
+  - 已补充配置加载与日志可用性单测,并更新 README 的配置说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
 ## T03 `[TODO]` 钉钉应用级 access_token 客户端
 - `infra/dingtalk_client.py`:`DingTalkClient`。

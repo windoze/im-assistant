@@ -1,25 +1,23 @@
-## Execution Plan
+# T02 Execution Plan
 
-I will use `TODO.md` as the authoritative task list, complete only the first task whose heading is not prefixed with `[DONE]`, validate the result according to that task's requirements, update the task record, commit the changes, and stop.
+## Scope
+- First incomplete task in `TODO.md`: `T02` — configuration loading and logging infrastructure.
+- Deliver `src/infra/config.py`, `src/infra/log.py`, `config.yaml`, tests for missing required settings and normal loading, then mark `T02` done and commit.
 
-Selected task: T01 `初始化项目骨架与依赖`.
+## Step-by-step plan
+1. Check the latest commit for any explicitly unfinished issue directly relevant to `T02`.
+2. Inspect existing project metadata, entry point, tests, and documentation to follow current conventions.
+3. Implement typed configuration loading that merges `.env` values with `config.yaml` non-secret settings and raises clear errors for missing required values.
+4. Implement structured logging with `get_logger(name)`.
+5. Add unit tests for successful config loading, missing required settings, and logger usability.
+6. Run formatting, linting, and tests in the required order.
+7. Update `TODO.md` by prefixing the T02 heading with `[DONE]` and adding a completion record.
+8. Commit all T02-related changes and stop.
 
-1. Read `TODO.md` to identify the first incomplete task and its validation requirements.
-2. Check the latest commit only for issues explicitly relevant to that selected task.
-3. Inspect the code and documentation needed for that task.
-4. Implement the required change without working around spec mismatches.
-5. Run formatting, linting, and tests required by the task and repository conventions.
-6. If a blocking prerequisite is discovered, add the minimum prerequisite task to `TODO.md`, keep the current task incomplete, commit, and stop.
-7. If the task is completed, prefix its `TODO.md` heading with `[DONE]`, update its completion record, commit all task-related changes, and stop.
-
-Task-specific steps:
-
-1. Completed: verified the current repository files and read the PLAN.md section that defines the directory layout.
-2. Completed: created the required Python package directories and `__init__.py` files.
-3. Completed: added `pyproject.toml` with runtime and development dependencies for Python 3.11+.
-4. Completed: added `src/main.py` with an asyncio entry point that logs startup.
-5. Completed: added `.env.example` and `.gitignore` entries required by T01.
-6. Completed: added the minimum test coverage needed for `pytest` to pass in the new skeleton.
-7. Completed: ran `python -m src.main`, `pytest`, and relevant formatting/linting checks.
-8. Completed: marked T01 `[DONE]` and updated its completion record.
-9. Next: commit the task changes and stop.
+## Progress
+- Identified `T02` as the first incomplete task.
+- Checked the latest commit; it only records T01 completion and does not add a T02 prerequisite.
+- Inspected the project metadata, entry point, existing smoke test, README, and `.env.example`.
+- Added typed configuration loading, default non-secret `config.yaml`, structured JSON logging, entry-point logging integration, and unit tests.
+- Ran required validation successfully: baseline checks before implementation, then `ruff format`, `ruff check`, `pytest`, and `python -m src.main` after implementation.
+- Marked `T02` as `[DONE]` in `TODO.md` with its completion record.

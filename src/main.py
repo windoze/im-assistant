@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
-_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+from src.infra.log import configure_logging, get_logger
 
-
-def configure_logging() -> None:
-    """Configure startup logging until the structured logger is added."""
-    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+logger = get_logger("im_assistant")
 
 
 async def main() -> None:
     """Start the assistant runtime."""
     configure_logging()
-    logging.getLogger("im_assistant").info("DingTalk AI assistant starting")
+    logger.info("DingTalk AI assistant starting")
 
 
 if __name__ == "__main__":
