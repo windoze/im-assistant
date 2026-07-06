@@ -193,10 +193,15 @@
 
 # M3 — 能力层(无 OBO)
 
-## T15 `[TODO]` Capability 模型与三级目录加载
+## [DONE] T15 Capability 模型与三级目录加载
 - `capabilities/base.py`:`Capability`(架构 §5:`name`、`origin(system|base|user)`、`available_in(list of global|group|dm)`、`requires(list[Requirement])`、`sensitivity`、`handler`);`Requirement`(`service`、`scopes`、`on_behalf_of`)。
 - `capabilities/registry.py`:从 `system/ → base/ → user/<userid>/` 三级目录加载并叠加(架构 §6.2)。
 - **验收**:能注册并列出能力;三级叠加顺序正确(user 覆盖 base 覆盖 system 同名)。
+- **完成记录(2026-07-07)**:
+  - 已实现 `Capability`、`Requirement`、`CapabilityRegistry` 与三级目录加载器;因 `src/capabilities/base/` 已作为 base 层目录存在,模型定义放在该包并从 `src.capabilities` 统一导出,以保留 `system/`、`base/`、`user/<userid>/` 三层目录结构。
+  - 已支持能力注册、按名称列出/获取、模块导出 `CAPABILITY`/`CAPABILITIES` 自动发现,并按 `system → base → user` 顺序叠加,同名能力由后加载层覆盖;user 层加载时自动补充 `owner_id`。
+  - 已补充单测覆盖模型校验、OBO requirement 判定、注册/覆盖/列出、三级叠加顺序、目录缺失和声明 origin 与目录层级不一致的错误处理;README 已补充能力注册说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`。
 
 ## T16 `[TODO]` 可见性闸门 canUse
 - `capabilities/registry.py` 加 `can_use(cap, mode, actor, channel) -> bool`,**纯函数**,逻辑严格按架构 §6.1:

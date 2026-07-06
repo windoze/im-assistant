@@ -45,6 +45,11 @@ On Stream startup the service idempotently initializes the SQLite database confi
 `storage.database_path` with tables for sessions, message history, identity bindings, audit logs,
 and encrypted token material.
 
+Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
+The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and
+`src/capabilities/user/<userId>/` in that order, so later tiers override earlier capabilities with
+the same name.
+
 Run tests:
 
 ```bash
