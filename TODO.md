@@ -55,13 +55,20 @@
   - 已补充 mock 单测覆盖 token 获取与缓存、提前刷新、并发只请求一次、应用/用户 token 请求头和 API 错误日志。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
-## T04 `[TODO]` 出站发送与通讯录冒烟
+## [DONE] T04 出站发送与通讯录冒烟
 - 在 `DingTalkClient` 加:
   - `async send_oto(user_ids: list[str], text: str)` → `POST /v1.0/robot/oToMessages/batchSend`(`robotCode`、`userIds`、`msgKey="sampleText"`、`msgParam={"content":...}`)。
   - `async send_group(open_conversation_id, text)` → `POST /v1.0/robot/groupMessages/send`。
   - `async get_user_list()` / `async user_by_id(userid)`:通讯录接口,建立 userId→姓名映射。
 - `scripts/smoke_send.py`:给指定 userId 发一条测试消息 + 打印通讯录。
 - **验收**:运行冒烟脚本,自己钉钉能收到机器人消息;通讯录能列出成员。
+- **完成记录(2026-07-07)**:
+  - 已在 `DingTalkClient` 增加 `send_oto()`、`send_group()`、`get_user_list()`、`user_by_id()`,统一复用应用级 access_token、`sampleText` 文本消息模板和结构化 API 错误处理。
+  - 已新增 `DingTalkUser` 归一化模型,支持通讯录分页读取并生成 `userId → 姓名` 映射。
+  - 已新增 `scripts/smoke_send.py`,可对指定 `userId` 发送单聊冒烟消息并打印指定部门通讯录;README 已补充运行示例。
+  - 已补充 mock 单测覆盖单聊发送、群聊发送、分页通讯录映射和按 userId 查询。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python scripts/smoke_send.py --help`。
+  - 真实钉钉发送冒烟需具备本地 `.env` 凭据和目标 `userId`;当前环境未配置 `DINGTALK_SMOKE_USER_ID`,未执行对真实账号的发送。
 
 ## T05 `[TODO]` 【REVIEW】M0 骨架与钉钉接入审阅
 - 审阅 T01–T04:目录/依赖是否符合 PLAN.md §3;token 缓存与刷新是否正确、并发安全;密钥是否只从配置读取无硬编码;错误处理是否完整;日志是否结构化。

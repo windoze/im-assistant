@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from src.infra.config import DingTalkConfig
-from src.infra.dingtalk_client import AccessToken, DingTalkAPIError, DingTalkClient
+from src.infra.dingtalk_client import AccessToken, DingTalkAPIError, DingTalkClient, DingTalkUser
 
 
 def _config() -> DingTalkConfig:
@@ -144,6 +144,120 @@ async def test_api_get_uses_supplied_user_token_without_fetching_app_token() -> 
 
     assert payload == {"result": ["user-1"]}
     assert paths == ["/v1.0/users"]
+
+
+@pytest.mark.asyncio
+async def test_send_oto_posts_robot_text_message() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        assert request.method == "POST"
+        assert request.url.path == "/v1.0/robot/oToMessages/batchSend"
+        assert request.headers["x-acs-dingtalk-access-token"] == "app-token"
+        body = json.loads(request.content)
+        assert body["robotCode"] == "robot-code"
+        assert body["userIds"] == ["user-1", "user-2"]
+        assert body["msgKey"] == "sampleText"
+        assert json.loads(body["msgParam"]) == {"content": "hello"}
+        return httpx.Response(200, json={"processQueryKey": "query-key"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        payload = await client.send_oto([" user-1 ", "user-2"], "hello")
+
+    assert payload == {"processQueryKey": "query-key"}
+    assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/robot/oToMessages/batchSend"]
+
+
+@pytest.mark.asyncio
+async def test_send_group_posts_robot_text_message() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        assert request.method == "POST"
+        assert request.url.path == "/v1.0/robot/groupMessages/send"
+        body = json.loads(request.content)
+        assert body["robotCode"] == "robot-code"
+        assert body["openConversationId"] == "cid-1"
+        assert body["msgKey"] == "sampleText"
+        assert json.loads(body["msgParam"]) == {"content": "group hello"}
+        return httpx.Response(200, json={"messageId": "message-1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        payload = await client.send_group(" cid-1 ", "group hello")
+
+    assert payload == {"messageId": "message-1"}
+    assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/robot/groupMessages/send"]
+
+
+@pytest.mark.asyncio
+async def test_get_user_list_returns_user_id_name_mapping_across_pages() -> None:
+    contact_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        contact_requests.append(request)
+        assert request.method == "GET"
+        assert request.url.path == "/v1.0/contact/departments/1/users"
+        assert request.headers["x-acs-dingtalk-access-token"] == "app-token"
+        assert request.url.params["maxResults"] == "2"
+        if "pageToken" not in request.url.params:
+            return httpx.Response(
+                200,
+                json={
+                    "users": [{"userId": "user-1", "name": "Alice"}],
+                    "nextPageToken": "next-page",
+                },
+            )
+
+        assert request.url.params["pageToken"] == "next-page"
+        return httpx.Response(200, json={"users": [{"userId": "user-2", "name": "Bob"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        users = await client.get_user_list(page_size=2)
+
+    assert users == {"user-1": "Alice", "user-2": "Bob"}
+    assert len(contact_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_user_by_id_fetches_and_normalizes_contact_user() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        assert request.method == "GET"
+        assert request.url.path == "/v1.0/contact/users/user-1"
+        return httpx.Response(
+            200,
+            json={"userId": "user-1", "name": "Alice", "email": "alice@example.com"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        user = await client.user_by_id(" user-1 ")
+
+    assert user == DingTalkUser(
+        user_id="user-1",
+        name="Alice",
+        raw={"userId": "user-1", "name": "Alice", "email": "alice@example.com"},
+    )
 
 
 @pytest.mark.asyncio

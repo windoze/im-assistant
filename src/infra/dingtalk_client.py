@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -16,9 +18,16 @@ from src.infra.log import get_logger
 logger = get_logger(__name__)
 
 ACCESS_TOKEN_PATH = "/v1.0/oauth2/accessToken"
+OTO_MESSAGE_PATH = "/v1.0/robot/oToMessages/batchSend"
+GROUP_MESSAGE_PATH = "/v1.0/robot/groupMessages/send"
+CONTACT_USER_LIST_PATH_TEMPLATE = "/v1.0/contact/departments/{department_id}/users"
+CONTACT_USER_BY_ID_PATH_TEMPLATE = "/v1.0/contact/users/{user_id}"
 TOKEN_HEADER = "x-acs-dingtalk-access-token"
 TOKEN_REFRESH_SKEW_SECONDS = 300
 DEFAULT_TIMEOUT_SECONDS = 10.0
+DEFAULT_CONTACT_DEPARTMENT_ID = "1"
+MAX_CONTACT_PAGE_SIZE = 100
+TEXT_MESSAGE_KEY = "sampleText"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +36,15 @@ class AccessToken:
 
     access_token: str
     expire_in: int
+
+
+@dataclass(frozen=True, slots=True)
+class DingTalkUser:
+    """Normalized DingTalk contact user details."""
+
+    user_id: str
+    name: str
+    raw: Mapping[str, Any]
 
 
 class DingTalkAPIError(RuntimeError):
@@ -129,6 +147,70 @@ class DingTalkClient:
         """GET from DingTalk with the application token or a supplied user token."""
 
         return await self._api_request("GET", path, params=params, use_user_token=use_user_token)
+
+    async def send_oto(self, user_ids: list[str], text: str) -> Any:
+        """Send a text robot message to one or more DingTalk one-to-one chats."""
+
+        request_body = {
+            "robotCode": self._config.robot_code,
+            "userIds": _normalize_user_ids(user_ids),
+            "msgKey": TEXT_MESSAGE_KEY,
+            "msgParam": _text_msg_param(text),
+        }
+        return await self.api_post(OTO_MESSAGE_PATH, request_body)
+
+    async def send_group(self, open_conversation_id: str, text: str) -> Any:
+        """Send a text robot message to a DingTalk group conversation."""
+
+        request_body = {
+            "robotCode": self._config.robot_code,
+            "openConversationId": _non_empty_string(
+                open_conversation_id,
+                "open_conversation_id",
+            ),
+            "msgKey": TEXT_MESSAGE_KEY,
+            "msgParam": _text_msg_param(text),
+        }
+        return await self.api_post(GROUP_MESSAGE_PATH, request_body)
+
+    async def get_user_list(
+        self,
+        *,
+        department_id: str | int = DEFAULT_CONTACT_DEPARTMENT_ID,
+        page_size: int = MAX_CONTACT_PAGE_SIZE,
+    ) -> dict[str, str]:
+        """Return a DingTalk contact mapping from userId to display name."""
+
+        normalized_department_id = _normalize_identifier(department_id, "department_id")
+        normalized_page_size = _normalize_page_size(page_size)
+        path = CONTACT_USER_LIST_PATH_TEMPLATE.format(
+            department_id=_quote_path_segment(normalized_department_id)
+        )
+
+        users: dict[str, str] = {}
+        page_token: str | None = None
+        while True:
+            params: dict[str, str | int] = {"maxResults": normalized_page_size}
+            if page_token is not None:
+                params["pageToken"] = page_token
+
+            payload = await self.api_get(path, params=params)
+            for user in _extract_contact_users(payload, method="GET", path=path):
+                users[user.user_id] = user.name
+
+            page_token = _extract_next_page_token(payload, method="GET", path=path)
+            if page_token is None:
+                return users
+
+    async def user_by_id(self, user_id: str) -> DingTalkUser:
+        """Fetch and normalize one DingTalk contact user by userId."""
+
+        normalized_user_id = _non_empty_string(user_id, "user_id")
+        path = CONTACT_USER_BY_ID_PATH_TEMPLATE.format(
+            user_id=_quote_path_segment(normalized_user_id)
+        )
+        payload = await self.api_get(path)
+        return _parse_contact_user(payload, method="GET", path=path)
 
     def _is_cached_token_fresh(self) -> bool:
         return self._clock() < self._refresh_after
@@ -299,3 +381,131 @@ def _optional_message(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _normalize_user_ids(user_ids: Sequence[str]) -> list[str]:
+    if isinstance(user_ids, (str, bytes)) or len(user_ids) == 0:
+        raise ValueError("user_ids must contain at least one userId")
+
+    normalized = [_non_empty_string(user_id, "user_id") for user_id in user_ids]
+    return normalized
+
+
+def _text_msg_param(text: str) -> str:
+    content = _non_empty_string(text, "text")
+    return json.dumps({"content": content}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _normalize_identifier(value: str | int, field_name: str) -> str:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a non-empty string or positive integer")
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError(f"{field_name} must be greater than 0")
+        return str(value)
+    return _non_empty_string(value, field_name)
+
+
+def _normalize_page_size(page_size: int) -> int:
+    if isinstance(page_size, bool) or not isinstance(page_size, int):
+        raise ValueError("page_size must be an integer")
+    if page_size <= 0 or page_size > MAX_CONTACT_PAGE_SIZE:
+        raise ValueError(f"page_size must be between 1 and {MAX_CONTACT_PAGE_SIZE}")
+    return page_size
+
+
+def _non_empty_string(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _quote_path_segment(value: str) -> str:
+    return quote(value, safe="")
+
+
+def _extract_contact_users(payload: Any, *, method: str, path: str) -> list[DingTalkUser]:
+    payload_object = _response_object(payload, method=method, path=path)
+    raw_users = _first_present(payload_object, "users", "list")
+
+    if raw_users is None and isinstance(payload_object.get("result"), Mapping):
+        raw_users = _first_present(payload_object["result"], "users", "list")
+
+    if not isinstance(raw_users, list):
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="contact user list response must include a users list",
+        )
+
+    return [_parse_contact_user(raw_user, method=method, path=path) for raw_user in raw_users]
+
+
+def _parse_contact_user(payload: Any, *, method: str, path: str) -> DingTalkUser:
+    payload_object = _response_object(payload, method=method, path=path)
+    if isinstance(payload_object.get("result"), Mapping):
+        payload_object = payload_object["result"]
+
+    user_id = _string_field(payload_object, "userId", "userid")
+    name = _string_field(payload_object, "name", "username")
+    if user_id is None or name is None:
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="contact user response must include userId and name",
+        )
+
+    return DingTalkUser(user_id=user_id, name=name, raw=dict(payload_object))
+
+
+def _extract_next_page_token(payload: Any, *, method: str, path: str) -> str | None:
+    payload_object = _response_object(payload, method=method, path=path)
+    raw_token = _first_present(payload_object, "nextPageToken", "nextToken")
+
+    if raw_token is None and isinstance(payload_object.get("result"), Mapping):
+        raw_token = _first_present(payload_object["result"], "nextPageToken", "nextToken")
+
+    if raw_token is None:
+        return None
+    if not isinstance(raw_token, str):
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="contact user list next page token must be a string",
+        )
+
+    token = raw_token.strip()
+    return token or None
+
+
+def _response_object(payload: Any, *, method: str, path: str) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="DingTalk response must be a JSON object",
+        )
+    return payload
+
+
+def _first_present(mapping: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _string_field(mapping: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip() != "":
+            return value.strip()
+    return None

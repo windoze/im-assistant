@@ -29,3 +29,9 @@ Run tests:
 ```bash
 pytest
 ```
+
+Send a DingTalk robot smoke-test message and print the contact mapping:
+
+```bash
+python scripts/smoke_send.py <userId>
+```
