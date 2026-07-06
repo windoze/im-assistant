@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from anthropic import AnthropicError
 
 from src.infra.config import LLMConfig
 from src.infra.llm import LLMClient, LLMError
@@ -80,6 +81,26 @@ async def test_complete_raises_when_response_has_no_text() -> None:
         await llm_client.complete("system prompt", [{"role": "user", "content": "question"}])
 
 
+@pytest.mark.asyncio
+async def test_complete_wraps_anthropic_errors() -> None:
+    """SDK failures should be surfaced as the local LLM error type."""
+
+    fake_client = FakeAnthropicClient(AnthropicError("rate limited"))
+    llm_client = LLMClient(_config(), anthropic_client=fake_client)
+
+    with pytest.raises(LLMError, match="Claude completion failed"):
+        await llm_client.complete("system prompt", [{"role": "user", "content": "question"}])
+
+    assert fake_client.messages.calls == [
+        {
+            "model": "claude-test-model",
+            "max_tokens": 1024,
+            "system": "system prompt",
+            "messages": [{"role": "user", "content": "question"}],
+        }
+    ]
+
+
 def _text_response(text: str) -> dict[str, object]:
     return {"content": [{"type": "text", "text": text}]}
 
@@ -109,6 +130,8 @@ class FakeMessagesResource:
 
     async def create(self, **kwargs: Any) -> Any:
         self.calls.append(dict(kwargs))
+        if isinstance(self._response, BaseException):
+            raise self._response
         return self._response
 
 

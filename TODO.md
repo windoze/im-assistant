@@ -122,10 +122,15 @@
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python -m src.main --help`。
   - 当前环境无真实钉钉 Stream/Anthropic `.env` 凭据,未执行私聊/@ 机器人外部人工验证;代码路径已由 mock 单测覆盖,具备凭据后可用 `python -m src.main --stream` 验证真实 LLM 回复和机器人独立身份。
 
-## T09 `[TODO]` 【REVIEW】M1 对话闭环审阅
+## [DONE] T09 【REVIEW】M1 对话闭环审阅
 - 审阅 T06–T08:Stream 回调是否稳健(异常不断连);归一化字段是否齐全;出站 webhook/OpenAPI 回退逻辑;LLM 调用错误处理。
 - 端到端人工验证:单聊、群聊 @ 各跑一次,确认独立身份。
 - 跑 `ruff`+`pytest`;输出问题清单并修复。
+- **完成记录(2026-07-07)**:
+  - 已审阅 T06–T08 的 DingTalk Stream 注册与回调处理、文本/非文本归一化字段、触发判定、`sessionWebhook` 优先与单聊/群聊 OpenAPI 回退、Claude 单轮调用与错误包装。
+  - 问题清单:未发现需要修改生产代码的缺陷;为审阅关注点补充了回归覆盖,包括 Stream `on_message` 异常被捕获且后续消息仍可处理、Anthropic SDK 异常被包装为 `LLMError`。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
+  - 当前环境无 `.env`,且缺少 `DINGTALK_APP_KEY`、`DINGTALK_APP_SECRET`、`DINGTALK_ROBOT_CODE`、`ANTHROPIC_API_KEY`、`OAUTH_REDIRECT_URI` 环境变量,未执行真实单聊/群聊 @ 的外部人工验证;M1 相关路径已由 mock 单测覆盖,具备凭据和钉钉 Stream 配置后可用 `python -m src.main --stream` 进行人工复验。
 
 ---
 

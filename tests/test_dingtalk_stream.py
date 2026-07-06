@@ -176,6 +176,32 @@ async def test_stream_adapter_returns_bad_request_for_invalid_callback() -> None
 
 
 @pytest.mark.asyncio
+async def test_stream_adapter_contains_on_message_exceptions_and_continues() -> None:
+    received_msg_ids: list[str] = []
+    fail_next = True
+
+    async def on_message(message: InboundEvent) -> None:
+        nonlocal fail_next
+        received_msg_ids.append(message.msg_id)
+        if fail_next:
+            fail_next = False
+            raise RuntimeError("downstream failure")
+
+    adapter = DingTalkStreamAdapter(_config(), on_message, client_factory=FakeStreamClient)
+    client = adapter.create_client()
+    handler = client.handlers[ChatbotMessage.TOPIC]
+
+    first_code, first_message = await handler.process(_callback(_payload(msgId="msg-1")))
+    second_code, second_message = await handler.process(_callback(_payload(msgId="msg-2")))
+
+    assert first_code == AckMessage.STATUS_SYSTEM_EXCEPTION
+    assert first_message == "on_message failed"
+    assert second_code == AckMessage.STATUS_OK
+    assert second_message == "ok"
+    assert received_msg_ids == ["msg-1", "msg-2"]
+
+
+@pytest.mark.asyncio
 async def test_stream_adapter_dispatches_unsupported_non_text_message() -> None:
     received: list[InboundEvent] = []
 
