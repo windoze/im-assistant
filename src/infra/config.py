@@ -22,6 +22,7 @@ REQUIRED_ENV_VARS = (
     "DINGTALK_ROBOT_CODE",
     "ANTHROPIC_API_KEY",
     "OAUTH_REDIRECT_URI",
+    "TOKEN_VAULT_FERNET_KEY",
 )
 
 
@@ -72,6 +73,13 @@ class StorageConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenVaultConfig:
+    """Fernet key used to encrypt delegated user tokens at rest."""
+
+    fernet_key: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class CapabilitiesConfig:
     """Capability visibility settings controlled outside source code."""
 
@@ -100,6 +108,7 @@ class AppConfig:
     llm: LLMConfig
     session: SessionConfig
     storage: StorageConfig
+    token_vault: TokenVaultConfig
     capabilities: CapabilitiesConfig
     logging: LoggingConfig
     oauth: OAuthConfig
@@ -157,6 +166,9 @@ def load_config(
                 "im_assistant.db",
                 base_dir=config_file.parent,
             ),
+        ),
+        token_vault=TokenVaultConfig(
+            fernet_key=_required_env(env_values, "TOKEN_VAULT_FERNET_KEY"),
         ),
         capabilities=CapabilitiesConfig(
             channel_enabled_capabilities=_channel_enabled_capabilities(capabilities_section),

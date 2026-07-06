@@ -12,7 +12,13 @@ DingTalk OpenAPI calls, Claude responses, SQLite state, and encrypted user token
    python -m pip install -e ".[dev]"
    ```
 
-3. Copy `.env.example` to `.env` and fill in the DingTalk and Anthropic values.
+3. Copy `.env.example` to `.env` and fill in the DingTalk and Anthropic values. Generate
+   `TOKEN_VAULT_FERNET_KEY` with:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
 4. Adjust non-secret settings such as the Claude model, DingTalk API base URL, session timeout,
    SQLite database path, document creation defaults, and log level in `config.yaml` when needed.
 
@@ -44,6 +50,10 @@ while different conversations can continue in parallel; each agent turn persists
 On Stream startup the service idempotently initializes the SQLite database configured by
 `storage.database_path` with tables for sessions, message history, identity bindings, audit logs,
 and encrypted token material.
+
+`src.infra.token_vault.TokenVault` stores DingTalk user-level OBO access and refresh tokens in the
+`token_vault` table encrypted with the `.env` Fernet key, and marks grants that are expired or within
+five minutes of expiry as needing refresh.
 
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and

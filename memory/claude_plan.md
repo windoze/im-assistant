@@ -1,19 +1,19 @@
-# Current Invocation Plan
+## Execution plan
 
-I will follow `TODO.md` as the source of truth and complete exactly the first task whose heading is not prefixed with `[DONE]`. This file records the execution plan and progress milestones, not private reasoning.
+I will follow `TODO.md` as the source of truth and complete only the first task whose heading is not prefixed with `[DONE]`.
 
 1. Read `TODO.md` to identify the first incomplete task and its validation requirements.
-2. Inspect only the files needed to understand and implement that task, including `PLAN.md` if the task depends on phase-level context.
-3. Implement the task completely, or add the minimum prerequisite task to `TODO.md` if a concrete blocker makes implementation impossible.
-4. Run the required formatting, linting, and tests in the requested order, addressing any unscheduled failures.
-5. Update `TODO.md` by prefixing the completed task with `[DONE]` and filling its completion record; update `PLAN.md` only if the phase plan changes.
-6. Commit all changes for this invocation with a descriptive message and stop without starting the next task.
+2. Check the latest commit message for any unfinished issue directly relevant to that task, without doing broad historical triage.
+3. Inspect only the files needed for the selected task, then implement the task completely or add the minimum prerequisite task if a concrete blocker makes the selected task impossible.
+4. Run formatting, linting, and relevant/full validation required by the task and repository conventions, addressing any unscheduled failures.
+5. Update this file at key milestones, update `TODO.md` with the `[DONE]` prefix and completion record if the task is completed, and update `PLAN.md` only if phase-level planning changes.
+6. Commit the resulting changes with a descriptive message including the required co-author trailer, then stop.
 
-Progress:
-- Created the invocation plan before running repository commands.
-- Identified `T19 【REVIEW】M3 能力层审阅` as the first incomplete task.
-- Task-specific scope: review T15-T18 implementation, especially Capability model alignment with architecture §5, `can_use` branch behavior against §6.1, tool execution error handling, three-tier registry overlay, and application-level DingTalk tools.
-- Validation plan: inspect relevant capability, agent loop, DingTalk client, config, README, and test coverage; fix any concrete review findings; run `ruff format`, `ruff check`, and `pytest`; record any external DingTalk validation limitation caused by missing credentials/config.
-- Review finding fixed: default immutable capability input schemas could leave nested `MappingProxyType` values in Claude tool definitions. AgentLoop and LLMClient now normalize tool schemas to plain JSON containers, with regression tests.
-- Validation completed: `ruff format`, `ruff check`, `pytest -q`, and `python -m src.main` passed. Real DingTalk document creation smoke could not run because required `.env` values and document/channel configuration are absent.
-- Documentation completed: `TODO.md` now marks T19 as `[DONE]` with the completion record.
+## Progress
+
+- Selected task: `T20` TokenVault (user-level token encrypted storage) is the first incomplete task in `TODO.md`.
+- Latest commit: `[T19] Review M3 capability layer`; it does not mention an unfinished issue that changes the T20 scope.
+- Implemented: added `src/infra/token_vault.py`, wired `TOKEN_VAULT_FERNET_KEY` through config, and documented key generation.
+- Validated: formatting, linting, full pytest suite, and `python -m src.main` passed.
+- Completed: marked `T20` as `[DONE]` in `TODO.md` with the completion record.
+- Next: review the diff and commit the task changes.

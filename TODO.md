@@ -255,10 +255,16 @@
 
 # M4 — OBO 授权(架构核心)
 
-## T20 `[TODO]` TokenVault(用户级 token 加密存储)
+## [DONE] T20 TokenVault(用户级 token 加密存储)
 - `infra/token_vault.py`:`(principal, service) → {user_access_token, refresh_token, scopes, exp}`,存 `token_vault` 表,值用 `cryptography` Fernet 加密(密钥从 `.env` 读)。
 - API:`get(principal, service)`、`put(...)`、`revoke(principal, service)`;`get` 返回时若快过期返回"需刷新"标记。
 - **验收**:单测覆盖存/取/撤销/加密(密文不可读)。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/infra/token_vault.py`,实现 `TokenVault` 与 `UserToken`,提供 `get(principal, service)`、`put(...)`、`revoke(principal, service)` API,复用现有 SQLite `token_vault` 表。
+  - 已将用户级 `user_access_token` 与 `refresh_token` 用 `cryptography` Fernet 加密后落库,密钥通过 `.env` 的 `TOKEN_VAULT_FERNET_KEY` 读取,并在 `.env.example` 与 README 中补充生成方式。
+  - `get` 会解密返回 token、scope、过期时间和 `needs_refresh` 标记;已按默认 5 分钟刷新窗口标记即将过期或已过期 token。
+  - 已补充单测覆盖存/取/撤销、密文不可读、scope 归一化、即将过期需刷新标记和配置加载。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T21 `[TODO]` 钉钉 OAuth2 端点与 code 换 token
 - `infra/oauth.py` + 一个轻量 HTTP 服务(`aiohttp`/`fastapi`,原型可临时域名/隧道):

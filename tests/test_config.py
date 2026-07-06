@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 
 from src.infra.config import ConfigError, load_config
 
+FERNET_KEY = Fernet.generate_key().decode("utf-8")
 REQUIRED_ENV = {
     "DINGTALK_APP_KEY": "app-key",
     "DINGTALK_APP_SECRET": "app-secret",
     "DINGTALK_ROBOT_CODE": "robot-code",
     "ANTHROPIC_API_KEY": "anthropic-key",
     "OAUTH_REDIRECT_URI": "https://example.com/oauth/callback",
+    "TOKEN_VAULT_FERNET_KEY": FERNET_KEY,
 }
 
 
@@ -62,6 +65,7 @@ logging:
     assert config.llm.anthropic_api_key == "anthropic-key"
     assert config.session.confirm_timeout_sec == 42
     assert config.storage.database_path == tmp_path / "state" / "assistant.db"
+    assert config.token_vault.fernet_key == FERNET_KEY
     assert config.capabilities.channel_enabled_capabilities == {
         "group-open-conversation-id": ("create_doc", "contact_lookup")
     }
@@ -87,6 +91,7 @@ def test_load_config_missing_required_values_reports_names(tmp_path) -> None:
     assert "DINGTALK_APP_SECRET" in message
     assert "ANTHROPIC_API_KEY" in message
     assert "OAUTH_REDIRECT_URI" in message
+    assert "TOKEN_VAULT_FERNET_KEY" in message
 
 
 def test_load_config_rejects_invalid_channel_enabled_capabilities(tmp_path) -> None:
