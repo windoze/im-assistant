@@ -9,6 +9,14 @@ from collections.abc import Mapping, Sequence
 import pytest
 
 from src.adapters.dingtalk import InboundEvent, InboundMessage, UnsupportedInboundMessage
+from src.core import (
+    GROUP_WELCOME_REPLY,
+    Actor,
+    BotIdentity,
+    Principal,
+    Session,
+    SessionRouteResult,
+)
 from src.main import ASSISTANT_SYSTEM_PROMPT, handle_inbound_event, main
 
 
@@ -38,6 +46,47 @@ async def test_handle_inbound_event_replies_to_triggered_text_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_inbound_event_routes_session_and_sends_group_welcome() -> None:
+    outbound = FakeOutbound()
+    llm_client = FakeLLMClient("LLM reply")
+    event = _text_event(
+        conversation_type=2,
+        conversation_id="group-conversation",
+        open_conversation_id="open-group-1",
+    )
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=Session(
+                session_id="dingtalk:group:group-conversation",
+                conversation_id="group-conversation",
+                kind="group",
+                bot=BotIdentity(id="robot-code"),
+                principal=Principal(kind="group", id="group:open-group-1"),
+                actor=Actor(id="user-1", display_name="Alice"),
+            ),
+            created=True,
+            should_send_welcome=True,
+        )
+    )
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        llm_client=llm_client,
+        session_manager=session_manager,
+    )
+
+    assert session_manager.events == [event]
+    assert llm_client.calls == [
+        (
+            ASSISTANT_SYSTEM_PROMPT,
+            [{"role": "user", "content": "hello"}],
+        )
+    ]
+    assert outbound.replies == [(event, GROUP_WELCOME_REPLY), (event, "LLM reply")]
+
+
+@pytest.mark.asyncio
 async def test_handle_inbound_event_replies_to_unsupported_message_type(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -62,14 +111,19 @@ async def test_handle_inbound_event_replies_to_unsupported_message_type(
     assert any(record.message == "dingtalk_unsupported_message_type" for record in caplog.records)
 
 
-def _text_event() -> InboundMessage:
+def _text_event(
+    *,
+    conversation_type: int = 1,
+    conversation_id: str = "conversation-1",
+    open_conversation_id: str = "conversation-1",
+) -> InboundMessage:
     return InboundMessage(
         text="hello",
         sender_staff_id="user-1",
         sender_nick="Alice",
-        conversation_type=1,
-        conversation_id="conversation-1",
-        open_conversation_id="conversation-1",
+        conversation_type=conversation_type,
+        conversation_id=conversation_id,
+        open_conversation_id=open_conversation_id,
         session_webhook="https://webhook.example.com/session",
         msg_id="msg-1",
     )
@@ -96,3 +150,15 @@ class FakeLLMClient:
     async def complete(self, system: str, messages: Sequence[Mapping[str, str]]) -> str:
         self.calls.append((system, [dict(message) for message in messages]))
         return self._reply
+
+
+class FakeSessionManager:
+    events: list[InboundEvent]
+
+    def __init__(self, result: SessionRouteResult) -> None:
+        self._result = result
+        self.events = []
+
+    async def get_or_create_for_event(self, event: InboundEvent) -> SessionRouteResult:
+        self.events.append(event)
+        return self._result

@@ -31,10 +31,11 @@ populated `.env` with DingTalk app credentials and an app configured for Stream 
 python -m src.main --stream
 ```
 
-When a user privately messages the bot or @mentions it in a group, the service sends the text to
-Claude with a short enterprise-assistant system prompt and replies through `sessionWebhook` when it
-is still valid, otherwise through DingTalk OpenAPI. This M1 path is intentionally stateless: no
-history, tools, or Session runtime are used yet. Non-text messages receive `暂只支持文本`.
+When a user privately messages the bot or @mentions it in a group, the service resolves one
+persistent Session for that DingTalk conversation, sends the text to Claude with a short
+enterprise-assistant system prompt, and replies through `sessionWebhook` when it is still valid,
+otherwise through DingTalk OpenAPI. The first group @mention activates that group Session and sends
+a welcome message before normal handling continues. Non-text messages receive `暂只支持文本`.
 
 On Stream startup the service idempotently initializes the SQLite database configured by
 `storage.database_path` with tables for sessions, message history, identity bindings, audit logs,

@@ -1,20 +1,20 @@
 # Execution Plan
 
-## Active task
+This file records the current execution plan and progress for this invocation. It intentionally summarizes rationale and steps without exposing private chain-of-thought.
 
-- First incomplete `TODO.md` entry handled in this invocation: `T10 [TODO] SQLite 存储层`.
+## Current Plan
 
-## Completed steps
+1. Read `TODO.md` first and identify the first task whose title is not prefixed with `[DONE]`.
+2. Inspect the relevant project files for that task only, plus `PLAN.md` or recent commit context only if it is directly needed for the selected task.
+3. Implement the selected task completely, preserving existing project conventions and avoiding unrelated changes.
+4. Run the required formatting, linting, and tests specified by the task and repository workflow.
+5. If unscheduled failures or blockers appear, fix them when in scope or add the minimum prerequisite task to `TODO.md`, then stop.
+6. Mark the completed task title with `[DONE]`, update its completion record, and update this plan file at key milestones.
+7. Commit all changes for this task with a descriptive message including the required co-author trailer.
 
-1. Identified T10 as the first incomplete task in `TODO.md`.
-2. Confirmed the latest commit is the completed M1 review and does not mention a T10 blocker.
-3. Captured a green baseline with `ruff check` and `pytest`.
-4. Added `src/infra/store.py` with idempotent schema creation and async CRUD helpers for `sessions`, `messages`, `identity_bindings`, `audit_log`, and `token_vault`.
-5. Added `storage.database_path` configuration and wired Stream startup to run SQLite initialization.
-6. Added README notes and unit tests for schema creation plus representative CRUD behavior.
-7. Ran final validation successfully with `ruff format`, `ruff check`, `pytest`, and `python -m src.main`.
-8. Marked T10 `[DONE]` in `TODO.md` with its completion record.
+## Progress
 
-## Remaining step
-
-1. Commit the T10 changes and stop.
+- Plan initialized before repository commands.
+- Identified first incomplete task: `T11 [TODO] Session 抽象与路由`.
+- Baseline formatting, linting, and tests pass before T11 changes.
+- Implemented persistent Session domain/routing, wired Stream handling through it, and verified formatting, linting, tests, and startup smoke.

@@ -147,11 +147,17 @@
   - 已补充单测覆盖建表幂等性和五张表的基本 CRUD 行为。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
-## T11 `[TODO]` Session 抽象与路由
+## [DONE] T11 Session 抽象与路由
 - `core/session.py`:`Session` dataclass(架构 §5:`kind(dm|group)`、`bot`、`principal`、`actor`、`context`(历史)、`state`(Idle/RunningAgent/AwaitingInteraction)、`lifecycle`)。
 - `core/session_manager.py`:按 `conversation_id` 取/建 Session;群聊共享一个 Session,`actor` 每条消息更新为发送者;持久化到 `sessions` 表。
 - 首次激活:群聊首次被 @ 记录激活 + 发欢迎语(架构 §8.3)。
 - **验收**:同一会话多次消息命中同一 Session;actor 正确随发送者变化。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/core/session.py`,定义 `Session`、`BotIdentity`、`Principal`、`Actor` 以及 `Idle` / `RunningAgent` / `AwaitingInteraction` 状态和 `dm` / `group` 会话类型。
+  - 已新增 `src/core/session_manager.py`,按 DingTalk `conversation_id` 取/建持久化 Session;私聊 principal 绑定触发用户,群聊 principal 绑定 `openConversationId`,同一群共享一个 Session。
+  - 已将 Stream 处理路径接入 `SessionManager`,每条触发消息都会更新当前 `actor`;群聊首次激活会记录 `activated`、`activated_by`、`activation_msg_id` 并发送欢迎语后继续正常处理。
+  - 已补充单测覆盖同一会话命中同一 Session、群聊 actor 随发送者变化、首次群激活欢迎语路由;README 已更新 Session runtime 行为说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
 ## T12 `[TODO]` per-session 串行 inbox
 - `core/inbox.py`:每个 Session 一个 asyncio 队列 + 单 worker 协程,消息**依次**处理不并发(架构 §8.1)。
