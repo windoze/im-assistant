@@ -382,6 +382,28 @@ class SQLiteStore:
         rows = await self._fetchall(query, params)
         return [_row_to_message(row) for row in rows]
 
+    async def list_recent_messages(self, session_id: str, *, limit: int) -> list[MessageRecord]:
+        """List the newest chat-history messages for a session in insertion order."""
+
+        rows = await self._fetchall(
+            """
+            SELECT *
+            FROM (
+                SELECT *
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY message_id DESC
+                LIMIT ?
+            )
+            ORDER BY message_id
+            """,
+            (
+                _non_empty_string(session_id, "session_id"),
+                _positive_int(limit, "limit"),
+            ),
+        )
+        return [_row_to_message(row) for row in rows]
+
     async def delete_messages_for_session(self, session_id: str) -> int:
         """Delete all chat-history messages for one session."""
 

@@ -11,6 +11,7 @@ from src.infra.log import configure_logging, get_logger
 
 if TYPE_CHECKING:
     from src.adapters.dingtalk import InboundEvent, InboundMessage
+    from src.core.agent_loop import AgentRunResult
     from src.core.session import Session
     from src.core.session_manager import SessionRouteResult
     from src.infra.config import AppConfig
@@ -40,6 +41,20 @@ class SessionRouter(Protocol):
         """Return the persistent Session route for one inbound event."""
 
 
+class AgentRunner(Protocol):
+    """Protocol for the persistent multi-turn agent loop."""
+
+    async def run(
+        self,
+        session: Session,
+        user_text: str,
+        *,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> AgentRunResult:
+        """Run one agent turn for a routed Session."""
+
+
 async def main(*, start_stream: bool = False, config: AppConfig | None = None) -> None:
     """Start the assistant runtime."""
 
@@ -50,7 +65,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
         return
 
     from src.adapters.dingtalk import DingTalkOutbound, DingTalkStreamAdapter
-    from src.core import SessionInboxDispatcher, SessionManager
+    from src.core import AgentLoop, SessionInboxDispatcher, SessionManager
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
     from src.infra.llm import LLMClient
@@ -65,13 +80,18 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
         async with DingTalkClient(app_config.dingtalk) as dingtalk_client:
             async with DingTalkOutbound(dingtalk_client) as outbound:
                 async with LLMClient(app_config.llm) as llm_client:
+                    agent_loop = AgentLoop(
+                        store,
+                        llm_client,
+                        system_prompt=ASSISTANT_SYSTEM_PROMPT,
+                    )
 
                     async def process_event(event: InboundEvent) -> None:
                         await handle_inbound_event(
                             event,
                             outbound=outbound,
-                            llm_client=llm_client,
                             session_manager=session_manager,
+                            agent_loop=agent_loop,
                         )
 
                     inbox_dispatcher = SessionInboxDispatcher(process_event)
@@ -89,8 +109,9 @@ async def handle_inbound_event(
     event: InboundEvent,
     *,
     outbound: ReplySender,
-    llm_client: TextCompleter,
+    llm_client: TextCompleter | None = None,
     session_manager: SessionRouter | None = None,
+    agent_loop: AgentRunner | None = None,
 ) -> None:
     """Apply trigger rules and route a normalized DingTalk inbound event."""
 
@@ -134,17 +155,24 @@ async def handle_inbound_event(
         await outbound.reply(event, UNSUPPORTED_MESSAGE_REPLY)
         return
 
-    await _on_inbound_message(event, outbound=outbound, llm_client=llm_client, session=session)
+    await _on_inbound_message(
+        event,
+        outbound=outbound,
+        llm_client=llm_client,
+        session=session,
+        agent_loop=agent_loop,
+    )
 
 
 async def _on_inbound_message(
     message: InboundMessage,
     *,
     outbound: ReplySender,
-    llm_client: TextCompleter,
+    llm_client: TextCompleter | None,
     session: Session | None = None,
+    agent_loop: AgentRunner | None = None,
 ) -> None:
-    """Complete one stateless LLM turn and reply to the DingTalk conversation."""
+    """Complete one LLM turn and reply to the DingTalk conversation."""
 
     logger.debug(
         "dingtalk_inbound_message_accepted",
@@ -153,10 +181,23 @@ async def _on_inbound_message(
             "session_id": None if session is None else session.session_id,
         },
     )
-    reply_text = await llm_client.complete(
-        ASSISTANT_SYSTEM_PROMPT,
-        [{"role": "user", "content": message.text}],
-    )
+    if agent_loop is not None:
+        if session is None:
+            raise ValueError("agent_loop requires a routed Session")
+        result = await agent_loop.run(
+            session,
+            message.text,
+            actor_id=message.sender_staff_id,
+            provider_message_id=message.msg_id,
+        )
+        reply_text = result.reply_text
+    else:
+        if llm_client is None:
+            raise ValueError("llm_client is required when agent_loop is not provided")
+        reply_text = await llm_client.complete(
+            ASSISTANT_SYSTEM_PROMPT,
+            [{"role": "user", "content": message.text}],
+        )
     await outbound.reply(message, reply_text)
 
 

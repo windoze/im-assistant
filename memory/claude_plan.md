@@ -14,8 +14,13 @@ Step-by-step plan:
 7. Commit all changes related to the completed task, including this progress file if it remains changed, then stop.
 
 Selected task:
-- `T12 [TODO] per-session 串行 inbox`: add a per-session asyncio queue and single worker, route inbound messages into the session inbox, and validate that messages in one session run strictly serially while different sessions can run concurrently.
+- `[DONE] T13 多轮上下文与 agent loop 骨架`: implemented `core/agent_loop.py`, loaded and appended conversation history through the `messages` table, routed message handling through the loop, preserved `Idle -> RunningAgent -> Idle` state transitions, and reserved suspend/resume/tool hook structure.
 
 Progress:
-- Added `src/core/inbox.py` with per-conversation Session inbox dispatch, Stream runtime enqueue wiring, README behavior notes, and async tests for same-session serial processing plus different-session parallel processing.
-- Validation passed with `ruff format`, `ruff check`, `pytest -q`, and `python -m src.main`; `TODO.md` now marks T12 complete with its completion record.
+- Started a new invocation and refreshed the execution plan before inspecting the task list.
+- Read `TODO.md` and identified T13 as the first incomplete task.
+- Checked the latest commit (`[T12] Implement per-session serial inbox`) and confirmed it aligns with the just-completed prerequisite rather than adding a new blocker for T13.
+- Ran the current lint/test baseline successfully before implementing T13.
+- Implemented `src/core/agent_loop.py`, bounded recent message loading, Stream routing through the loop, state persistence, README notes, and focused unit coverage.
+- Validation passed with `.venv/bin/ruff format .`, `.venv/bin/ruff check .`, `.venv/bin/pytest -q`, and `python -m src.main`.
+- Marked T13 `[DONE]` in `TODO.md` with its completion record.

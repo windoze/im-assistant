@@ -12,6 +12,7 @@ from src.adapters.dingtalk import InboundEvent, InboundMessage, UnsupportedInbou
 from src.core import (
     GROUP_WELCOME_REPLY,
     Actor,
+    AgentRunResult,
     BotIdentity,
     Principal,
     Session,
@@ -87,6 +88,42 @@ async def test_handle_inbound_event_routes_session_and_sends_group_welcome() -> 
 
 
 @pytest.mark.asyncio
+async def test_handle_inbound_event_uses_agent_loop_for_routed_text_message() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(
+        conversation_type=2,
+        conversation_id="group-conversation",
+        open_conversation_id="open-group-1",
+    )
+    routed_session = Session(
+        session_id="dingtalk:group:group-conversation",
+        conversation_id="group-conversation",
+        kind="group",
+        bot=BotIdentity(id="robot-code"),
+        principal=Principal(kind="group", id="group:open-group-1"),
+        actor=Actor(id="user-1", display_name="Alice"),
+    )
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=routed_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("loop reply")
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+    )
+
+    assert agent_loop.calls == [(routed_session, "hello", "user-1", "msg-1")]
+    assert outbound.replies == [(event, "loop reply")]
+
+
+@pytest.mark.asyncio
 async def test_handle_inbound_event_replies_to_unsupported_message_type(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -150,6 +187,25 @@ class FakeLLMClient:
     async def complete(self, system: str, messages: Sequence[Mapping[str, str]]) -> str:
         self.calls.append((system, [dict(message) for message in messages]))
         return self._reply
+
+
+class FakeAgentLoop:
+    calls: list[tuple[Session, str, str | None, str | None]]
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+        self.calls = []
+
+    async def run(
+        self,
+        session: Session,
+        user_text: str,
+        *,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> AgentRunResult:
+        self.calls.append((session, user_text, actor_id, provider_message_id))
+        return AgentRunResult(reply_text=self._reply)
 
 
 class FakeSessionManager:

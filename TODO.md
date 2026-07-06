@@ -169,10 +169,16 @@
   - 已补充单测覆盖同一会话快速 3 条消息严格 FIFO 串行处理、不同会话处理可并行;README 已补充 inbox 调度行为。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T13 `[TODO]` 多轮上下文与 agent loop 骨架
+## [DONE] T13 多轮上下文与 agent loop 骨架
 - `core/agent_loop.py`:维护对话历史(从 `messages` 表加载/追加);`async run(session, user_text)`:组装历史 → LLM → 回复 → 存历史。
 - 预留 `suspend/resume` 状态位与 tool 调用挂点(工具在 M3 接);状态机 `Idle→RunningAgent→Idle`(架构 §8.1)。
 - **验收**:多轮对话有上下文(如"我叫X"后再问"我叫什么"能答对);历史落库。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/core/agent_loop.py`,实现 `AgentLoop.run(session, user_text)`,按 Session 从 SQLite `messages` 表加载有上限的最近历史,组装多轮上下文调用 Claude,并在成功完成后追加用户/助手消息。
+  - 已将 Stream 文本处理路径接入 `AgentLoop`,保留既有非文本回复和群聊首次欢迎语;实际 LLM 回复后仍通过既有 DingTalk 出站封装发送。
+  - 已持久化 `Idle→RunningAgent→Idle` 状态流转,并保留 `AwaitingInteraction`/resume 拒绝路径与 M3 tool executor 挂点;新增 `list_recent_messages()` 支持最近历史按时间顺序加载。
+  - 已补充单测覆盖多轮历史进入 prompt、历史落库、最近历史截断、运行中状态持久化、`AwaitingInteraction` 预留路径和主处理链路调用 agent loop;README 已更新多轮上下文与状态说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T14 `[TODO]` 【REVIEW】M2 会话运行时审阅
 - 审阅 T10–T13:Session 路由是否正确(群共享/actor 更新);串行 inbox 是否真串行、不同会话真并行;历史加载是否有上限/截断策略;状态机流转是否清晰。

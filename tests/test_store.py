@@ -92,6 +92,11 @@ async def test_store_supports_basic_crud_for_all_t10_tables(tmp_path) -> None:
         )
         assert await store.list_messages("session-1") == [user_message, assistant_message]
         assert await store.list_messages("session-1", limit=1) == [user_message]
+        assert await store.list_recent_messages("session-1", limit=1) == [assistant_message]
+        assert await store.list_recent_messages("session-1", limit=2) == [
+            user_message,
+            assistant_message,
+        ]
 
         binding = await store.upsert_identity_binding(
             IdentityBindingRecord(
