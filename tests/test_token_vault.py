@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
@@ -9,6 +10,19 @@ from cryptography.fernet import Fernet
 
 from src.infra.store import SQLiteStore
 from src.infra.token_vault import TokenVault
+
+
+class RefreshRejected(RuntimeError):
+    """Test exception representing an invalid provider refresh token."""
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshPayload:
+    """Provider refresh result shape consumed by TokenVault.get_valid."""
+
+    access_token: str
+    refresh_token: str
+    expires_at: datetime
 
 
 @pytest.mark.asyncio
@@ -78,3 +92,121 @@ async def test_token_vault_marks_near_expiry_tokens_for_refresh(tmp_path) -> Non
         stored = await vault.get("principal-1", "calendar")
         assert stored is not None
         assert stored.needs_refresh is True
+
+
+@pytest.mark.asyncio
+async def test_token_vault_get_valid_silently_refreshes_stale_token(tmp_path) -> None:
+    """Stale grants should be refreshed, persisted, and returned as usable tokens."""
+
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    calls: list[str] = []
+
+    async def refresh(refresh_token: str) -> RefreshPayload:
+        calls.append(refresh_token)
+        return RefreshPayload(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            expires_at=datetime(2026, 1, 1, 13, 0, tzinfo=UTC),
+        )
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        vault = TokenVault(store, fernet_key=fernet_key, now_factory=lambda: now)
+        await vault.put(
+            principal="principal-1",
+            service="calendar",
+            user_access_token="old-access",
+            refresh_token="old-refresh",
+            scopes=("calendar:read",),
+            expires_at=datetime(2026, 1, 1, 12, 1, tzinfo=UTC),
+        )
+
+        resolution = await vault.get_valid(
+            "principal-1",
+            "calendar",
+            refresh=refresh,
+            refresh_rejected_exceptions=(RefreshRejected,),
+        )
+
+        assert resolution.token is not None
+        assert resolution.token.user_access_token == "new-access"
+        assert resolution.token.refresh_token == "new-refresh"
+        assert resolution.token.scopes == ("calendar:read",)
+        assert resolution.token.needs_refresh is False
+        assert resolution.refreshed is True
+        assert resolution.needs_reauthorization is False
+        assert calls == ["old-refresh"]
+
+        stored = await vault.get("principal-1", "calendar")
+        assert stored == resolution.token
+
+
+@pytest.mark.asyncio
+async def test_token_vault_get_valid_revokes_rejected_refresh_token(tmp_path) -> None:
+    """Invalid refresh tokens should be cleared so the caller can request consent again."""
+
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+    async def refresh(_: str) -> RefreshPayload:
+        raise RefreshRejected("refresh token expired")
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        vault = TokenVault(store, fernet_key=fernet_key, now_factory=lambda: now)
+        await vault.put(
+            principal="principal-1",
+            service="calendar",
+            user_access_token="old-access",
+            refresh_token="expired-refresh",
+            scopes=("calendar:read",),
+            expires_at=datetime(2026, 1, 1, 11, 59, tzinfo=UTC),
+        )
+
+        resolution = await vault.get_valid(
+            "principal-1",
+            "calendar",
+            refresh=refresh,
+            refresh_rejected_exceptions=(RefreshRejected,),
+        )
+
+        assert resolution.token is None
+        assert resolution.needs_reauthorization is True
+        assert resolution.reauthorization_reason == "refresh_rejected"
+        assert await vault.get("principal-1", "calendar") is None
+
+
+@pytest.mark.asyncio
+async def test_token_vault_get_valid_revokes_stale_token_without_refresh_token(tmp_path) -> None:
+    """A stale grant without refresh material cannot be recovered silently."""
+
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+    async def refresh(_: str) -> RefreshPayload:
+        raise AssertionError("refresh should not be called without refresh token")
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        vault = TokenVault(store, fernet_key=fernet_key, now_factory=lambda: now)
+        await vault.put(
+            principal="principal-1",
+            service="calendar",
+            user_access_token="old-access",
+            refresh_token=None,
+            scopes=("calendar:read",),
+            expires_at=datetime(2026, 1, 1, 11, 59, tzinfo=UTC),
+        )
+
+        resolution = await vault.get_valid(
+            "principal-1",
+            "calendar",
+            refresh=refresh,
+            refresh_rejected_exceptions=(RefreshRejected,),
+        )
+
+        assert resolution.token is None
+        assert resolution.needs_reauthorization is True
+        assert resolution.reauthorization_reason == "missing_refresh_token"
+        assert await vault.get("principal-1", "calendar") is None

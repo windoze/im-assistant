@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -17,6 +18,8 @@ from src.infra.dingtalk_client import (
     DingTalkDocument,
     DingTalkTodo,
     DingTalkUser,
+    DingTalkUserAccessToken,
+    DingTalkUserTokenRefreshRejected,
 )
 
 
@@ -151,6 +154,67 @@ async def test_api_get_uses_supplied_user_token_without_fetching_app_token() -> 
 
     assert payload == {"result": ["user-1"]}
     assert paths == ["/v1.0/users"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_user_access_token_posts_refresh_grant_and_parses_expiry() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/v1.0/oauth2/userAccessToken"
+        assert json.loads(request.content) == {
+            "clientId": "app-key",
+            "clientSecret": "app-secret",
+            "refreshToken": "old-refresh-token",
+            "grantType": "refresh_token",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "accessToken": "new-user-token",
+                "refreshToken": "new-refresh-token",
+                "expireIn": 3600,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client, now_factory=lambda: now)
+
+        token = await client.refresh_user_access_token(" old-refresh-token ")
+
+    assert token == DingTalkUserAccessToken(
+        access_token="new-user-token",
+        refresh_token="new-refresh-token",
+        expire_in=3600,
+        expires_at=datetime(2026, 1, 1, 13, 0, tzinfo=UTC),
+        raw={
+            "accessToken": "new-user-token",
+            "refreshToken": "new-refresh-token",
+            "expireIn": 3600,
+        },
+    )
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_user_access_token_rejects_invalid_refresh_token() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"code": "invalid_grant", "message": "refresh token expired"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        with pytest.raises(DingTalkUserTokenRefreshRejected) as exc_info:
+            await client.refresh_user_access_token("expired-refresh-token")
+
+    assert exc_info.value.error.status_code == 400
+    assert exc_info.value.error.errcode == "invalid_grant"
 
 
 @pytest.mark.asyncio

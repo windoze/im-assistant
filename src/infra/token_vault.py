@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Literal, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from src.infra.config import TokenVaultConfig
+from src.infra.log import get_logger
 from src.infra.store import SQLiteStore, TokenVaultRecord
 
 DEFAULT_REFRESH_SKEW_SECONDS = 300
+logger = get_logger(__name__)
+TokenReauthorizationReason = Literal["missing", "missing_refresh_token", "refresh_rejected"]
 
 
 class TokenVaultError(RuntimeError):
@@ -31,6 +35,29 @@ class UserToken:
     needs_refresh: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class RefreshedUserToken(Protocol):
+    """Shape returned by a provider-specific refresh-token exchange."""
+
+    access_token: str
+    refresh_token: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TokenVaultResolution:
+    """Result of resolving stored delegated token material for immediate use."""
+
+    token: UserToken | None = None
+    refreshed: bool = False
+    reauthorization_reason: TokenReauthorizationReason | None = None
+
+    @property
+    def needs_reauthorization(self) -> bool:
+        """Return whether the caller must start a fresh consent flow."""
+
+        return self.reauthorization_reason is not None
 
 
 class TokenVault:
@@ -64,6 +91,52 @@ class TokenVault:
         if record is None:
             return None
         return self._decrypt_record(record)
+
+    async def get_valid(
+        self,
+        principal: str,
+        service: str,
+        *,
+        refresh: Callable[[str], Awaitable[RefreshedUserToken]],
+        refresh_rejected_exceptions: Sequence[type[Exception]],
+    ) -> TokenVaultResolution:
+        """Return a usable token, silently refreshing stale grants when possible."""
+
+        if not callable(refresh):
+            raise ValueError("refresh must be callable")
+        rejected_exception_types = _exception_type_tuple(refresh_rejected_exceptions)
+        token = await self.get(principal, service)
+        if token is None:
+            return TokenVaultResolution(reauthorization_reason="missing")
+        if not token.needs_refresh:
+            return TokenVaultResolution(token=token)
+        if token.refresh_token is None:
+            await self.revoke(token.principal_id, token.service)
+            logger.warning(
+                "token_vault_refresh_token_missing",
+                extra={"principal_id": token.principal_id, "service": token.service},
+            )
+            return TokenVaultResolution(reauthorization_reason="missing_refresh_token")
+
+        try:
+            refreshed = await refresh(token.refresh_token)
+        except rejected_exception_types:
+            await self.revoke(token.principal_id, token.service)
+            logger.warning(
+                "token_vault_refresh_rejected",
+                extra={"principal_id": token.principal_id, "service": token.service},
+            )
+            return TokenVaultResolution(reauthorization_reason="refresh_rejected")
+
+        stored = await self.put(
+            principal=token.principal_id,
+            service=token.service,
+            user_access_token=refreshed.access_token,
+            refresh_token=refreshed.refresh_token,
+            scopes=token.scopes,
+            expires_at=refreshed.expires_at,
+        )
+        return TokenVaultResolution(token=stored, refreshed=True)
 
     async def put(
         self,
@@ -154,6 +227,16 @@ def _positive_int(value: int, field_name: str) -> int:
     if value <= 0:
         raise ValueError(f"`{field_name}` must be greater than 0")
     return value
+
+
+def _exception_type_tuple(values: Sequence[type[Exception]]) -> tuple[type[Exception], ...]:
+    if isinstance(values, type) or not isinstance(values, Sequence):
+        raise ValueError("refresh_rejected_exceptions must be a sequence of exception types")
+    normalized = tuple(values)
+    for value in normalized:
+        if not isinstance(value, type) or not issubclass(value, Exception):
+            raise ValueError("refresh_rejected_exceptions must contain only exception types")
+    return normalized
 
 
 def _to_utc(value: datetime) -> datetime:

@@ -53,7 +53,9 @@ and encrypted token material.
 
 `src.infra.token_vault.TokenVault` stores DingTalk user-level OBO access and refresh tokens in the
 `token_vault` table encrypted with the `.env` Fernet key, and marks grants that are expired or within
-five minutes of expiry as needing refresh.
+five minutes of expiry as needing refresh. `TokenVault.get_valid(...)` can silently refresh those
+grants through the DingTalk refresh-token grant and clears rejected refresh tokens so the caller can
+start a new consent flow.
 
 `src.infra.oauth` provides the DingTalk OAuth2 HTTP endpoints for OBO flows. Applications create a
 short-lived `PendingAuthStore` nonce with the requesting actor identity, send the user to

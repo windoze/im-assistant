@@ -292,9 +292,14 @@
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_oauth.py -q`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
   - 当前环境缺少真实钉钉 OAuth 登录回调公网 HTTPS/隧道和可用 `.env` 凭据,未执行外部浏览器人工授权;本人/他人授权路径已通过 mock DingTalk OAuth 与 `contact/users/me` 响应构造验证。
 
-## T23 `[TODO]` 静默刷新
+## [DONE] T23 静默刷新
 - `infra/dingtalk_client.py`/`token_vault`:用户 token 过期时用 `grantType=refresh_token`+refreshToken 换新;刷新失败(refresh 失效)→ 清 vault 条目,标记需重新授权。
 - **验收**:模拟 token 过期,能自动刷新;refresh 失效时正确降级。
+- **完成记录(2026-07-07)**:
+  - 已在 `DingTalkClient` 增加用户级 token 静默刷新接口,使用 `POST /v1.0/oauth2/userAccessToken` 与 `grantType=refresh_token` / `refreshToken` 换取新的 `accessToken`、`refreshToken` 和过期时间。
+  - 已在 `TokenVault` 增加 `get_valid(...)` 解析结果:有效 token 直接返回,临近过期/过期 token 自动调用刷新器并加密回写;refresh token 缺失或被钉钉拒绝时清理 vault 条目并返回需重新授权原因。
+  - 已补充单测覆盖 DingTalk refresh grant 请求/解析、无效 refresh token 拒绝、TokenVault 自动刷新落库、refresh 失效清库降级和缺失 refresh token 降级;README 已补充静默刷新说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_dingtalk_client.py tests/test_token_vault.py -q`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
 
 ## T24 `[TODO]` Authorizer 三态与 CredentialContext
 - `capabilities/authorizer.py`:`async resolve(requirement, actor, mode)` → `Granted(handle) | NeedsConsent(url) | Denied(reason)`(架构 §6.3):

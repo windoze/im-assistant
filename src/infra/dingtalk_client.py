@@ -7,6 +7,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -18,6 +19,7 @@ from src.infra.log import get_logger
 logger = get_logger(__name__)
 
 ACCESS_TOKEN_PATH = "/v1.0/oauth2/accessToken"
+USER_ACCESS_TOKEN_PATH = "/v1.0/oauth2/userAccessToken"
 OTO_MESSAGE_PATH = "/v1.0/robot/oToMessages/batchSend"
 GROUP_MESSAGE_PATH = "/v1.0/robot/groupMessages/send"
 CONTACT_USER_LIST_PATH_TEMPLATE = "/v1.0/contact/departments/{department_id}/users"
@@ -68,6 +70,17 @@ class DingTalkTodo:
     raw: Mapping[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class DingTalkUserAccessToken:
+    """DingTalk user-level OAuth token returned by refresh-token exchange."""
+
+    access_token: str
+    refresh_token: str
+    expire_in: int
+    expires_at: datetime
+    raw: Mapping[str, Any]
+
+
 class DingTalkAPIError(RuntimeError):
     """Raised when DingTalk returns an HTTP or application-level API error."""
 
@@ -94,6 +107,14 @@ class DingTalkAPIError(RuntimeError):
         super().__init__(", ".join(details))
 
 
+class DingTalkUserTokenRefreshRejected(RuntimeError):
+    """Raised when DingTalk rejects a stored user refresh token as unusable."""
+
+    def __init__(self, error: DingTalkAPIError) -> None:
+        self.error = error
+        super().__init__(f"DingTalk user refresh token was rejected: {error}")
+
+
 class DingTalkClient:
     """Client for DingTalk OpenAPI calls that need application or user tokens."""
 
@@ -104,11 +125,13 @@ class DingTalkClient:
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        now_factory: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._config = config
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout)
         self._owns_http_client = http_client is None
         self._clock = clock
+        self._now_factory = now_factory
         self._token_lock = asyncio.Lock()
         self._cached_token: AccessToken | None = None
         self._refresh_after = 0.0
@@ -168,6 +191,49 @@ class DingTalkClient:
         """GET from DingTalk with the application token or a supplied user token."""
 
         return await self._api_request("GET", path, params=params, use_user_token=use_user_token)
+
+    async def refresh_user_access_token(self, refresh_token: str) -> DingTalkUserAccessToken:
+        """Exchange a stored DingTalk user refresh token for fresh user token material."""
+
+        request_body = {
+            "clientId": self._config.app_key,
+            "clientSecret": self._config.app_secret,
+            "refreshToken": _non_empty_string(refresh_token, "refresh_token"),
+            "grantType": "refresh_token",
+        }
+        try:
+            response = await self._http_client.post(
+                self._build_url(USER_ACCESS_TOKEN_PATH),
+                json=request_body,
+            )
+            payload = _parse_response(response, method="POST", path=USER_ACCESS_TOKEN_PATH)
+        except DingTalkAPIError as exc:
+            if _is_refresh_token_rejected(exc):
+                logger.warning(
+                    "dingtalk_user_token_refresh_rejected",
+                    extra={
+                        "method": "POST",
+                        "path": USER_ACCESS_TOKEN_PATH,
+                        "status_code": exc.status_code,
+                        "errcode": exc.errcode,
+                        "errmsg": exc.errmsg,
+                    },
+                )
+                raise DingTalkUserTokenRefreshRejected(exc) from exc
+            raise
+        except httpx.HTTPError:
+            logger.exception(
+                "dingtalk_user_token_refresh_request_failed",
+                extra={"method": "POST", "path": USER_ACCESS_TOKEN_PATH},
+            )
+            raise
+
+        return _parse_user_access_token_payload(
+            payload,
+            now=_to_utc(self._now_factory()),
+            method="POST",
+            path=USER_ACCESS_TOKEN_PATH,
+        )
 
     async def send_oto(self, user_ids: list[str], text: str) -> Any:
         """Send a text robot message to one or more DingTalk one-to-one chats."""
@@ -398,6 +464,39 @@ def _parse_response(response: httpx.Response, *, method: str, path: str) -> Any:
     return parse_dingtalk_response(response, method=method, path=path)
 
 
+def _parse_user_access_token_payload(
+    payload: Any,
+    *,
+    now: datetime,
+    method: str,
+    path: str,
+) -> DingTalkUserAccessToken:
+    if not isinstance(payload, Mapping):
+        raise _invalid_user_access_token_response(method=method, path=path)
+
+    access_token = payload.get("accessToken")
+    refresh_token = payload.get("refreshToken")
+    expire_in = payload.get("expireIn")
+    if (
+        not isinstance(access_token, str)
+        or access_token.strip() == ""
+        or not isinstance(refresh_token, str)
+        or refresh_token.strip() == ""
+        or isinstance(expire_in, bool)
+        or not isinstance(expire_in, int)
+        or expire_in <= 0
+    ):
+        raise _invalid_user_access_token_response(method=method, path=path)
+
+    return DingTalkUserAccessToken(
+        access_token=access_token.strip(),
+        refresh_token=refresh_token.strip(),
+        expire_in=expire_in,
+        expires_at=_to_utc(now) + timedelta(seconds=expire_in),
+        raw=dict(payload),
+    )
+
+
 def parse_dingtalk_response(response: httpx.Response, *, method: str, path: str) -> Any:
     """Parse DingTalk HTTP responses and raise structured API errors."""
 
@@ -424,6 +523,41 @@ def parse_dingtalk_response(response: httpx.Response, *, method: str, path: str)
             errmsg=errmsg,
         )
     return payload
+
+
+def _invalid_user_access_token_response(*, method: str, path: str) -> DingTalkAPIError:
+    logger.error(
+        "dingtalk_user_token_response_invalid",
+        extra={"method": method, "path": path, "status_code": 200},
+    )
+    return DingTalkAPIError(
+        method=method,
+        path=path,
+        status_code=200,
+        errcode=None,
+        errmsg=(
+            "user access token response must include accessToken, "
+            "refreshToken, and positive expireIn"
+        ),
+    )
+
+
+def _is_refresh_token_rejected(error: DingTalkAPIError) -> bool:
+    if error.status_code in (400, 401, 403):
+        return True
+
+    details = f"{error.errcode or ''} {error.errmsg or ''}".lower()
+    return "refresh" in details and any(
+        marker in details
+        for marker in (
+            "invalid",
+            "expired",
+            "expire",
+            "rejected",
+            "unauthorized",
+            "forbidden",
+        )
+    )
 
 
 def _json_payload(response: httpx.Response, *, method: str, path: str) -> Any:
@@ -526,6 +660,12 @@ def _non_empty_string(value: str, field_name: str) -> str:
     if not isinstance(value, str) or value.strip() == "":
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _detail_url_mapping(value: Mapping[str, str]) -> dict[str, str]:
