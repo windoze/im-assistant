@@ -301,12 +301,18 @@
   - 已补充单测覆盖 DingTalk refresh grant 请求/解析、无效 refresh token 拒绝、TokenVault 自动刷新落库、refresh 失效清库降级和缺失 refresh token 降级;README 已补充静默刷新说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_dingtalk_client.py tests/test_token_vault.py -q`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
 
-## T24 `[TODO]` Authorizer 三态与 CredentialContext
+## [DONE] T24 Authorizer 三态与 CredentialContext
 - `capabilities/authorizer.py`:`async resolve(requirement, actor, mode)` → `Granted(handle) | NeedsConsent(url) | Denied(reason)`(架构 §6.3):
   - 查 TokenVault:有效/可刷新 → Granted;无 → 生成 pending+授权 url → NeedsConsent;群模式需 OBO → Denied。
 - `capabilities/credential.py`:`CredentialContext`,按资源选应用级+unionId 或用户级 OBO(架构 §7.1);向工具暴露 `ctx.user.*` / `ctx.group.*`。
 - agent loop:工具执行前对其 `requires` 逐条 `resolve`;NeedsConsent → 挂起会话 + 发授权链接(接 M5 的 consent 原语,或本任务先用简单发链接方式,M5 再归并)。
 - **验收**:单测覆盖三态;缺授权时会话挂起并发出链接。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/capabilities/authorizer.py`,实现 `Granted` / `NeedsConsent` / `Denied` 三态;OBO requirement 在 DM 中先查 `TokenVault.get_valid(...)` 并复用 DingTalk refresh grant,有效 token 转为 user credential,缺失/refresh 失效/scope 不足时创建 `PendingAuthStore` nonce 并返回 `/oauth/start?nonce=...` 授权链接,群聊 OBO 直接 Denied。
+  - 已新增 `src/capabilities/credential.py`,实现 `CredentialContext`、`CredentialHandle`、`ctx.user.*`、`ctx.group.*` 和 `ctx.require_user_token(service)`,供工具在应用级 identity 与用户级 OBO token 之间按资源选择。
+  - 已将 `AgentLoop` 接入 Authorizer:执行带 `requires` 的工具前逐条 resolve;`Granted` 注入 credential context;`Denied` 作为 tool error 回给 Claude;`NeedsConsent` 持久化用户消息和授权链接、写入 `pending_interaction` 元数据,并把 Session 状态挂起为 `AwaitingInteraction`。
+  - Stream 启动路径已创建 `TokenVault`、`PendingAuthStore` 和 `Authorizer`,并用通讯录 `user_by_id` 将当前 actor userId 解析为 OAuth 身份核对所需的 unionId;README 已补充 Authorizer/CredentialContext 说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_authorizer.py tests/test_agent_loop.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T25 `[TODO]` OBO 工具:今日日程总结(招牌 case)
 - `capabilities/system/schedule_summary.py`:`requires=[Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor")]`,`available_in=[dm]`。

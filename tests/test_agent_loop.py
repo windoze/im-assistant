@@ -6,11 +6,19 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from src.capabilities import Capability, CapabilityRegistry, Requirement
+from src.capabilities import (
+    Capability,
+    CapabilityRegistry,
+    CredentialHandle,
+    Granted,
+    NeedsConsent,
+    Requirement,
+)
 from src.core import (
     Actor,
     AgentLoop,
@@ -20,6 +28,7 @@ from src.core import (
     Principal,
     Session,
 )
+from src.infra.oauth import PendingAuth
 from src.infra.store import SessionRecord, SQLiteStore
 
 
@@ -273,6 +282,154 @@ async def test_agent_loop_injects_capability_services(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_injects_granted_credential_context(tmp_path) -> None:
+    """Granted Authorizer handles should be available through `ctx.user`."""
+
+    def read_calendar(context: CapabilityExecutionContext) -> str:
+        return context.user.token_for("calendar")
+
+    registry = CapabilityRegistry(
+        [
+            Capability(
+                name="read_calendar",
+                origin="system",
+                available_in=["global"],
+                requires=[
+                    Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor")
+                ],
+                handler=read_calendar,
+            )
+        ]
+    )
+    llm_client = ToolCallingCompleter(
+        [
+            [{"type": "tool_use", "id": "toolu-calendar", "name": "read_calendar", "input": {}}],
+            [{"type": "text", "text": "calendar reply"}],
+        ]
+    )
+    authorizer = FakeAuthorizer(
+        Granted(
+            CredentialHandle.user_token(
+                service="calendar",
+                user_access_token="user-access-token",
+                scopes=("calendar:read",),
+                principal_id="user:user-1",
+                actor_id="user-1",
+            )
+        )
+    )
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+            authorizer=authorizer,
+        )
+
+        result = await agent_loop.run(session, "read my calendar")
+
+    tool_result = llm_client.calls[1]["messages"][-1]["content"][0]
+    assert result.reply_text == "calendar reply"
+    assert tool_result["content"] == "user-access-token"
+    assert authorizer.calls == [
+        (
+            Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor"),
+            "user-1",
+            "dm",
+            "user:user-1",
+            "dingtalk:dm:conversation-1",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_suspends_and_returns_consent_link_when_authorization_is_missing(
+    tmp_path,
+) -> None:
+    """NeedsConsent should persist AwaitingInteraction and return the consent link text."""
+
+    def should_not_run(_context: CapabilityExecutionContext) -> str:
+        raise AssertionError("handler must not run before consent")
+
+    pending = PendingAuth(
+        nonce="nonce-1",
+        principal_id="user:user-1",
+        actor_id="union-1",
+        session_id="dingtalk:dm:conversation-1",
+        service="calendar",
+        scopes=("calendar:read",),
+        expires_at=datetime(2026, 1, 1, 12, 10, tzinfo=UTC),
+    )
+    registry = CapabilityRegistry(
+        [
+            Capability(
+                name="read_calendar",
+                origin="system",
+                available_in=["global"],
+                requires=[
+                    Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor")
+                ],
+                handler=should_not_run,
+            )
+        ]
+    )
+    llm_client = ToolCallingCompleter(
+        [[{"type": "tool_use", "id": "toolu-calendar", "name": "read_calendar", "input": {}}]]
+    )
+    authorizer = FakeAuthorizer(
+        NeedsConsent(
+            url="https://assistant.example.com/oauth/start?nonce=nonce-1",
+            pending=pending,
+            reason="missing",
+        )
+    )
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+            authorizer=authorizer,
+        )
+
+        result = await agent_loop.run(
+            session,
+            "read my calendar",
+            actor_id="user-1",
+            provider_message_id="msg-consent",
+        )
+        stored_session = await store.get_session(session.session_id)
+        stored_messages = await store.list_messages(session.session_id)
+
+    assert result.status == "awaiting_interaction"
+    assert "https://assistant.example.com/oauth/start?nonce=nonce-1" in result.reply_text
+    assert stored_session is not None
+    assert stored_session.state == "AwaitingInteraction"
+    assert stored_session.context["pending_interaction"] == {
+        "kind": "consent",
+        "correlation_id": "nonce-1",
+        "responder": "user-1",
+        "capability": "read_calendar",
+        "tool_use_id": "toolu-calendar",
+        "service": "calendar",
+        "scopes": ["calendar:read"],
+        "url": "https://assistant.example.com/oauth/start?nonce=nonce-1",
+        "reason": "missing",
+    }
+    assert [(message.role, message.content) for message in stored_messages] == [
+        ("user", "read my calendar"),
+        ("assistant", result.reply_text),
+    ]
+    assert stored_messages[1].metadata["status"] == "awaiting_interaction"
+    assert len(llm_client.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_returns_tool_execution_errors_to_claude(tmp_path) -> None:
     """Handler failures should become tool_result errors rather than crashing the turn."""
 
@@ -519,6 +676,34 @@ class ToolCallingCompleter:
         if not self._responses:
             raise AssertionError("no scripted LLM response remaining")
         return FakeToolResponse(tuple(self._responses.pop(0)))
+
+
+class FakeAuthorizer:
+    """Fake capability authorizer returning one scripted resolution."""
+
+    def __init__(self, resolution: object) -> None:
+        self._resolution = resolution
+        self.calls: list[tuple[Requirement, str, str, str | None, str | None]] = []
+
+    async def resolve(
+        self,
+        requirement: Requirement,
+        actor: object,
+        mode: str,
+        *,
+        principal_id: str | None = None,
+        session_id: str | None = None,
+    ) -> object:
+        self.calls.append(
+            (
+                requirement,
+                actor.id,
+                mode,
+                principal_id,
+                session_id,
+            )
+        )
+        return self._resolution
 
 
 @dataclass(frozen=True, slots=True)

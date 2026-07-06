@@ -67,6 +67,13 @@ access/refresh token in `TokenVault` before invoking the completion callback use
 pending session. The configured `OAUTH_REDIRECT_URI` must point at `/oauth/callback` on a public HTTPS
 URL or local tunnel for browser-based manual validation.
 
+`src.capabilities.Authorizer` is the execution-time authorization gate for capability requirements.
+For OBO requirements it checks `TokenVault.get_valid(...)`, uses DingTalk silent refresh when needed,
+returns `Granted` with a user credential when a usable token exists, returns `NeedsConsent` with a
+pending `/oauth/start?nonce=...` link when consent is missing, and returns `Denied` for OBO tools
+outside DMs. When an agent tool call needs consent, the Session is persisted as `AwaitingInteraction`
+and the bot replies with the authorization link.
+
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and
 `src/capabilities/user/<userId>/` in that order, so later tiers override earlier capabilities with
@@ -77,8 +84,10 @@ listed under `capabilities.channel_enabled.<channel_id>` in `config.yaml`.
 
 Visible executable capabilities are exposed to Claude as tools. A capability may provide
 `description` and JSON-object `input_schema` metadata; its handler is called as
-`handler(context, **arguments)` with a `CapabilityExecutionContext`. Handler failures are returned to
-Claude as error `tool_result` blocks so the agent loop can continue to a normal text reply.
+`handler(context, **arguments)` with a `CapabilityExecutionContext`. Handlers can use `context.user`,
+`context.group`, and `context.require_user_token(service)` from the injected `CredentialContext`.
+Handler failures are returned to Claude as error `tool_result` blocks so the agent loop can continue
+to a normal text reply.
 
 The built-in system tier now includes three application-level DingTalk tools that use the app access
 token and do not require OBO authorization:

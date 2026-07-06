@@ -9,7 +9,18 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
-from src.capabilities import Capability, CapabilityChannelContext, CapabilityRegistry, can_use
+from src.capabilities import (
+    AuthorizationResolution,
+    Capability,
+    CapabilityChannelContext,
+    CapabilityRegistry,
+    CredentialContext,
+    Denied,
+    Granted,
+    NeedsConsent,
+    Requirement,
+    can_use,
+)
 from src.core.session import Session, SessionState
 from src.infra.log import get_logger
 from src.infra.store import MessageRecord, MessageRole, SessionRecord
@@ -18,7 +29,7 @@ logger = get_logger(__name__)
 
 DEFAULT_HISTORY_LIMIT = 20
 DEFAULT_MAX_TOOL_ITERATIONS = 8
-AgentRunStatus = Literal["completed"]
+AgentRunStatus = Literal["completed", "awaiting_interaction"]
 
 
 class AgentLoopStateError(RuntimeError):
@@ -27,6 +38,22 @@ class AgentLoopStateError(RuntimeError):
 
 class AgentLoopToolError(RuntimeError):
     """Raised when Claude tool-use orchestration cannot continue safely."""
+
+
+class AgentLoopConsentRequired(RuntimeError):
+    """Raised internally when a tool call must suspend for OAuth consent."""
+
+    def __init__(
+        self,
+        *,
+        consent: NeedsConsent,
+        capability: Capability,
+        tool_use: ToolUseRequest,
+    ) -> None:
+        self.consent = consent
+        self.capability = capability
+        self.tool_use = tool_use
+        super().__init__(f"Consent required for capability: {capability.name}")
 
 
 class CapabilityServiceError(RuntimeError):
@@ -48,11 +75,14 @@ class CapabilityExecutionContext:
     session: Session
     capability: Capability
     services: Mapping[str, object] = field(default_factory=dict)
+    credentials: CredentialContext | None = None
 
     def __post_init__(self) -> None:
         """Freeze service mappings so handlers cannot mutate runtime wiring."""
 
         object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
+        if self.credentials is None:
+            object.__setattr__(self, "credentials", CredentialContext.for_session(self.session))
 
     def require_service(self, name: str) -> object:
         """Return a named runtime service or raise a clear handler-facing error."""
@@ -61,6 +91,29 @@ class CapabilityExecutionContext:
         if service_name not in self.services:
             raise CapabilityServiceError(f"Capability service is not configured: {service_name}")
         return self.services[service_name]
+
+    @property
+    def user(self):
+        """Return the current actor credential facade as `ctx.user`."""
+
+        if self.credentials is None:
+            raise CapabilityServiceError("Credential context is not configured")
+        return self.credentials.user
+
+    @property
+    def group(self):
+        """Return the current group credential facade as `ctx.group`, if any."""
+
+        if self.credentials is None:
+            raise CapabilityServiceError("Credential context is not configured")
+        return self.credentials.group
+
+    def require_user_token(self, service: str) -> str:
+        """Return a granted OBO token for a service."""
+
+        if self.credentials is None:
+            raise CapabilityServiceError("Credential context is not configured")
+        return self.credentials.require_user_token(service)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +174,21 @@ class ToolExecutor(Protocol):
         """Execute one model-requested tool call and return text for Claude."""
 
 
+class CapabilityAuthorizer(Protocol):
+    """Authorization gate consumed before executing capability handlers."""
+
+    async def resolve(
+        self,
+        requirement: Requirement,
+        actor: object,
+        mode: str,
+        *,
+        principal_id: str | None = None,
+        session_id: str | None = None,
+    ) -> AuthorizationResolution:
+        """Resolve one capability requirement for a Session actor."""
+
+
 class AgentLoop:
     """Run one serialized agent turn for a persistent Session."""
 
@@ -136,6 +204,7 @@ class AgentLoop:
         capability_registry_factory: Callable[[Session], CapabilityRegistry] | None = None,
         channel_enabled_capabilities: Mapping[str, Sequence[str]] | None = None,
         capability_services: Mapping[str, object] | None = None,
+        authorizer: CapabilityAuthorizer | None = None,
         max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
     ) -> None:
         if capability_registry is not None and capability_registry_factory is not None:
@@ -153,6 +222,7 @@ class AgentLoop:
             channel_enabled_capabilities or {}
         )
         self._capability_services = MappingProxyType(dict(capability_services or {}))
+        self._authorizer = authorizer
         self._max_tool_iterations = _positive_int(max_tool_iterations, "max_tool_iterations")
 
     async def run(
@@ -169,6 +239,7 @@ class AgentLoop:
         _ensure_idle(session)
 
         await self._set_session_state(session, "RunningAgent")
+        suspended = False
         try:
             history = await self._store.list_recent_messages(
                 session.session_id,
@@ -186,14 +257,43 @@ class AgentLoop:
                 },
             )
 
-            if visible_capabilities:
-                reply_text = await self._complete_with_tools(
+            try:
+                if visible_capabilities:
+                    reply_text = await self._complete_with_tools(
+                        session,
+                        llm_messages,
+                        visible_capabilities,
+                    )
+                else:
+                    reply_text = await self._llm_client.complete(self._system_prompt, llm_messages)
+            except AgentLoopConsentRequired as exc:
+                reply_text = _consent_reply_text(exc.consent)
+                await self._persist_suspended_turn(
                     session,
-                    llm_messages,
-                    visible_capabilities,
+                    user_text=normalized_text,
+                    reply_text=reply_text,
+                    actor_id=actor_id,
+                    provider_message_id=provider_message_id,
+                    consent=exc.consent,
+                    capability=exc.capability,
+                    tool_use=exc.tool_use,
                 )
-            else:
-                reply_text = await self._llm_client.complete(self._system_prompt, llm_messages)
+                await self._set_session_state(
+                    session,
+                    "AwaitingInteraction",
+                    context=_context_with_pending_consent(session, exc),
+                )
+                suspended = True
+                logger.info(
+                    "agent_loop_awaiting_consent",
+                    extra={
+                        "session_id": session.session_id,
+                        "capability": exc.capability.name,
+                        "service": exc.consent.pending.service,
+                        "scopes": list(exc.consent.pending.scopes),
+                    },
+                )
+                return AgentRunResult(reply_text=reply_text, status="awaiting_interaction")
             await self._persist_completed_turn(
                 session,
                 user_text=normalized_text,
@@ -207,7 +307,8 @@ class AgentLoop:
             )
             return AgentRunResult(reply_text=reply_text)
         finally:
-            await self._set_session_state(session, "Idle")
+            if not suspended:
+                await self._set_session_state(session, "Idle")
 
     async def _persist_completed_turn(
         self,
@@ -232,6 +333,43 @@ class AgentLoop:
             content=reply_text,
             actor_id=session.bot.id,
             metadata={"status": "completed"},
+        )
+
+    async def _persist_suspended_turn(
+        self,
+        session: Session,
+        *,
+        user_text: str,
+        reply_text: str,
+        actor_id: str | None,
+        provider_message_id: str | None,
+        consent: NeedsConsent,
+        capability: Capability,
+        tool_use: ToolUseRequest,
+    ) -> None:
+        await self._store.add_message(
+            session_id=session.session_id,
+            role="user",
+            content=user_text,
+            actor_id=actor_id or session.actor.id,
+            provider_message_id=provider_message_id,
+            metadata={"source": "dingtalk"},
+        )
+        await self._store.add_message(
+            session_id=session.session_id,
+            role="assistant",
+            content=reply_text,
+            actor_id=session.bot.id,
+            metadata={
+                "status": "awaiting_interaction",
+                "kind": "consent",
+                "capability": capability.name,
+                "tool_use_id": tool_use.id,
+                "service": consent.pending.service,
+                "scopes": list(consent.pending.scopes),
+                "pending_nonce": consent.pending.nonce,
+                "reason": consent.reason,
+            },
         )
 
     def _visible_capabilities(self, session: Session) -> list[Capability]:
@@ -309,6 +447,8 @@ class AgentLoop:
                 "tool_use_id": tool_use.id,
                 "content": result,
             }
+        except AgentLoopConsentRequired:
+            raise
         except Exception as exc:
             logger.exception(
                 "agent_loop_tool_execution_failed",
@@ -331,6 +471,10 @@ class AgentLoop:
         tool_use: ToolUseRequest,
         capabilities: Mapping[str, Capability],
     ) -> str:
+        capability = capabilities.get(tool_use.name)
+        if capability is None:
+            raise AgentLoopToolError(f"Tool is not available in this Session: {tool_use.name}")
+        credentials = await self._credential_context_for_capability(session, capability, tool_use)
         if self._tool_executor is not None:
             return _tool_result_text(
                 await self._tool_executor.execute(
@@ -340,18 +484,63 @@ class AgentLoop:
                 )
             )
 
-        capability = capabilities.get(tool_use.name)
-        if capability is None:
-            raise AgentLoopToolError(f"Tool is not available in this Session: {tool_use.name}")
         return await _execute_capability_handler(
             session,
             capability,
             tool_use.arguments,
             services=self._capability_services,
+            credentials=credentials,
         )
 
-    async def _set_session_state(self, session: Session, state: SessionState) -> None:
-        await self._store.upsert_session(_session_record_with_state(session, state))
+    async def _credential_context_for_capability(
+        self,
+        session: Session,
+        capability: Capability,
+        tool_use: ToolUseRequest,
+    ) -> CredentialContext:
+        if not capability.requires:
+            return CredentialContext.for_session(session)
+        if self._authorizer is None:
+            raise AgentLoopToolError(
+                f"Capability requires authorization but no Authorizer is configured: "
+                f"{capability.name}"
+            )
+
+        handles = []
+        for requirement in capability.requires:
+            resolution = await self._authorizer.resolve(
+                requirement,
+                session.actor,
+                session.kind,
+                principal_id=session.principal.id,
+                session_id=session.session_id,
+            )
+            if isinstance(resolution, Granted):
+                handles.append(resolution.handle)
+            elif isinstance(resolution, NeedsConsent):
+                raise AgentLoopConsentRequired(
+                    consent=resolution,
+                    capability=capability,
+                    tool_use=tool_use,
+                )
+            elif isinstance(resolution, Denied):
+                raise AgentLoopToolError(
+                    f"Capability {capability.name} denied by Authorizer: {resolution.reason}"
+                )
+            else:
+                raise AgentLoopToolError("Authorizer returned an unsupported resolution")
+        return CredentialContext.for_session(session, handles=handles)
+
+    async def _set_session_state(
+        self,
+        session: Session,
+        state: SessionState,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> None:
+        await self._store.upsert_session(
+            _session_record_with_state(session, state, context=context)
+        )
 
 
 def _ensure_idle(session: Session) -> None:
@@ -434,6 +623,7 @@ async def _execute_capability_handler(
     arguments: Mapping[str, Any],
     *,
     services: Mapping[str, object],
+    credentials: CredentialContext,
 ) -> str:
     if capability.handler is None:
         raise AgentLoopToolError(f"Capability has no handler: {capability.name}")
@@ -442,6 +632,7 @@ async def _execute_capability_handler(
         session=session,
         capability=capability,
         services=services,
+        credentials=credentials,
     )
     result = capability.handler(context, **dict(arguments))
     if inspect.isawaitable(result):
@@ -458,6 +649,35 @@ def _tool_result_text(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     except TypeError:
         return str(value)
+
+
+def _consent_reply_text(consent: NeedsConsent) -> str:
+    scopes = (
+        "、".join(consent.pending.scopes) if consent.pending.scopes else consent.pending.service
+    )
+    return (
+        f"需要你授权 {consent.pending.service}（{scopes}）后我才能继续。"
+        f"请打开链接完成授权：{consent.url}"
+    )
+
+
+def _context_with_pending_consent(
+    session: Session,
+    exc: AgentLoopConsentRequired,
+) -> dict[str, Any]:
+    context = dict(session.context)
+    context["pending_interaction"] = {
+        "kind": "consent",
+        "correlation_id": exc.consent.pending.nonce,
+        "responder": session.actor.id,
+        "capability": exc.capability.name,
+        "tool_use_id": exc.tool_use.id,
+        "service": exc.consent.pending.service,
+        "scopes": list(exc.consent.pending.scopes),
+        "url": exc.consent.url,
+        "reason": exc.consent.reason,
+    }
+    return context
 
 
 def _plain_json_object(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:
@@ -496,7 +716,12 @@ def _channel_enabled_capabilities(
     return normalized
 
 
-def _session_record_with_state(session: Session, state: SessionState) -> SessionRecord:
+def _session_record_with_state(
+    session: Session,
+    state: SessionState,
+    *,
+    context: Mapping[str, Any] | None = None,
+) -> SessionRecord:
     return SessionRecord(
         session_id=session.session_id,
         conversation_id=session.conversation_id,
@@ -506,7 +731,7 @@ def _session_record_with_state(session: Session, state: SessionState) -> Session
         actor_id=session.actor.id,
         state=state,
         lifecycle=session.lifecycle,
-        context=session.context,
+        context=session.context if context is None else context,
         created_at=session.created_at,
     )
 

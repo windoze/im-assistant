@@ -1,11 +1,31 @@
 """Capability registration and execution package."""
 
+from src.capabilities.authorizer import (
+    AuthorizationResolution,
+    Authorizer,
+    AuthorizerActorContext,
+    AuthorizerDingTalkClient,
+    AuthorizerError,
+    AuthorizerTokenVault,
+    Denied,
+    Granted,
+    NeedsConsent,
+    build_oauth_start_url,
+)
 from src.capabilities.base import (
     Capability,
     CapabilityAvailability,
     CapabilityHandler,
     CapabilityOrigin,
     Requirement,
+)
+from src.capabilities.credential import (
+    CredentialContext,
+    CredentialError,
+    CredentialGroupContext,
+    CredentialHandle,
+    CredentialKind,
+    CredentialUserContext,
 )
 from src.capabilities.registry import (
     CapabilityActorContext,
@@ -19,6 +39,12 @@ from src.capabilities.registry import (
 )
 
 __all__ = [
+    "AuthorizationResolution",
+    "Authorizer",
+    "AuthorizerActorContext",
+    "AuthorizerDingTalkClient",
+    "AuthorizerError",
+    "AuthorizerTokenVault",
     "Capability",
     "CapabilityActorContext",
     "CapabilityAvailability",
@@ -28,7 +54,17 @@ __all__ = [
     "CapabilityOrigin",
     "CapabilityRegistry",
     "CapabilityRegistryError",
+    "CredentialContext",
+    "CredentialError",
+    "CredentialGroupContext",
+    "CredentialHandle",
+    "CredentialKind",
+    "CredentialUserContext",
+    "Denied",
+    "Granted",
+    "NeedsConsent",
     "Requirement",
+    "build_oauth_start_url",
     "can_use",
     "load_capabilities_from_directory",
     "load_capability_registry",

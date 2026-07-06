@@ -2,9 +2,11 @@
 
 from src.core.agent_loop import (
     AgentLoop,
+    AgentLoopConsentRequired,
     AgentLoopStateError,
     AgentLoopToolError,
     AgentRunResult,
+    CapabilityAuthorizer,
     CapabilityExecutionContext,
     CapabilityServiceError,
     ToolExecutor,
@@ -16,10 +18,12 @@ from src.core.session_manager import GROUP_WELCOME_REPLY, SessionManager, Sessio
 __all__ = [
     "Actor",
     "AgentLoop",
+    "AgentLoopConsentRequired",
     "AgentLoopStateError",
     "AgentLoopToolError",
     "AgentRunResult",
     "BotIdentity",
+    "CapabilityAuthorizer",
     "CapabilityExecutionContext",
     "CapabilityServiceError",
     "GROUP_WELCOME_REPLY",

@@ -65,12 +65,14 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
         return
 
     from src.adapters.dingtalk import DingTalkOutbound, DingTalkStreamAdapter
-    from src.capabilities import load_capability_registry
+    from src.capabilities import Authorizer, load_capability_registry
     from src.core import AgentLoop, SessionInboxDispatcher, SessionManager
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
     from src.infra.llm import LLMClient
+    from src.infra.oauth import PendingAuthStore
     from src.infra.store import SQLiteStore
+    from src.infra.token_vault import TokenVault
 
     app_config = config or load_config()
     configure_logging(app_config.logging.level, force=True)
@@ -78,12 +80,32 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
     async with SQLiteStore(app_config.storage.database_path) as store:
         await store.initialize()
         session_manager = SessionManager(store, bot_id=app_config.dingtalk.robot_code)
+        token_vault = TokenVault.from_config(store, app_config.token_vault)
+        pending_auth_store = PendingAuthStore()
 
         def capability_registry_for_session(session: Session):
             user_id = session.actor.id if session.kind == "dm" else None
             return load_capability_registry(user_id=user_id)
 
         async with DingTalkClient(app_config.dingtalk) as dingtalk_client:
+
+            async def actor_union_id(actor: object) -> str:
+                user = await dingtalk_client.user_by_id(
+                    _required_string(getattr(actor, "id", None), "actor.id")
+                )
+                union_id = getattr(user, "union_id", None)
+                if union_id is None and isinstance(getattr(user, "raw", None), Mapping):
+                    union_id = user.raw.get("unionId")
+                return _required_string(union_id, "actor.union_id")
+
+            authorizer = Authorizer(
+                token_vault=token_vault,
+                pending_store=pending_auth_store,
+                dingtalk_client=dingtalk_client,
+                oauth_config=app_config.oauth,
+                actor_identity_resolver=actor_union_id,
+            )
+
             async with DingTalkOutbound(dingtalk_client) as outbound:
                 async with LLMClient(app_config.llm) as llm_client:
                     agent_loop = AgentLoop(
@@ -103,6 +125,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                                 "parent_object_id": app_config.dingtalk.document.parent_object_id,
                             },
                         },
+                        authorizer=authorizer,
                     )
 
                     async def process_event(event: InboundEvent) -> None:
@@ -230,6 +253,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="connect DingTalk Stream and log normalized inbound chatbot messages",
     )
     return parser.parse_args(argv)
+
+
+def _required_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
 
 
 def cli(argv: Sequence[str] | None = None) -> None:
