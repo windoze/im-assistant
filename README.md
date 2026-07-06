@@ -55,13 +55,15 @@ and encrypted token material.
 `token_vault` table encrypted with the `.env` Fernet key, and marks grants that are expired or within
 five minutes of expiry as needing refresh.
 
-`src.infra.oauth` provides the DingTalk OAuth2 HTTP endpoints used by future OBO flows. Applications
-create a short-lived `PendingAuthStore` nonce, send the user to `/oauth/start?nonce=<nonce>`, and the
-aiohttp service redirects to DingTalk consent with `state=<nonce>`. `/oauth/callback` validates and
-consumes that state once, exchanges the authorization code at
-`/v1.0/oauth2/userAccessToken`, and returns the user access token plus refresh token to the supplied
-completion callback. The configured `OAUTH_REDIRECT_URI` must point at `/oauth/callback` on a public
-HTTPS URL or local tunnel for browser-based manual validation.
+`src.infra.oauth` provides the DingTalk OAuth2 HTTP endpoints for OBO flows. Applications create a
+short-lived `PendingAuthStore` nonce with the requesting actor identity, send the user to
+`/oauth/start?nonce=<nonce>`, and the aiohttp service redirects to DingTalk consent with
+`state=<nonce>`. `/oauth/callback` validates and consumes that state once, exchanges the authorization
+code at `/v1.0/oauth2/userAccessToken`, calls `/v1.0/contact/users/me` with the user token, rejects
+the callback if the returned `unionId` does not match the pending actor, then stores the verified
+access/refresh token in `TokenVault` before invoking the completion callback used to resume the
+pending session. The configured `OAUTH_REDIRECT_URI` must point at `/oauth/callback` on a public HTTPS
+URL or local tunnel for browser-based manual validation.
 
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and

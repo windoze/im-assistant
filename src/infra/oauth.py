@@ -7,23 +7,26 @@ import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlencode
 
 import httpx
 from aiohttp import web
 
 from src.infra.config import AppConfig, DingTalkConfig, OAuthConfig
-from src.infra.dingtalk_client import DingTalkAPIError, parse_dingtalk_response
+from src.infra.dingtalk_client import TOKEN_HEADER, DingTalkAPIError, parse_dingtalk_response
 from src.infra.log import get_logger
+from src.infra.token_vault import UserToken
 
 logger = get_logger(__name__)
 
 AUTHORIZATION_URL = "https://login.dingtalk.com/oauth2/auth"
 USER_ACCESS_TOKEN_PATH = "/v1.0/oauth2/userAccessToken"
+CONTACT_USER_ME_PATH = "/v1.0/contact/users/me"
 DEFAULT_PENDING_AUTH_TTL_SECONDS = 600
 DEFAULT_TIMEOUT_SECONDS = 10.0
 OAUTH_SUCCESS_MESSAGE = "DingTalk authorization completed. You can return to the chat."
+OAUTH_IDENTITY_MISMATCH_MESSAGE = "DingTalk authorization user did not match the requesting actor."
 
 
 class OAuthError(RuntimeError):
@@ -38,12 +41,33 @@ class PendingAuthExpired(OAuthError):
     """Raised when an OAuth state nonce exists but has expired."""
 
 
+class OAuthIdentityMismatch(OAuthError):
+    """Raised when the authorized DingTalk user is not the pending actor."""
+
+
+class OAuthTokenVault(Protocol):
+    """TokenVault methods needed by the OAuth callback."""
+
+    async def put(
+        self,
+        *,
+        principal: str,
+        service: str,
+        user_access_token: str,
+        refresh_token: str | None,
+        scopes: Sequence[str],
+        expires_at: datetime | None,
+    ) -> UserToken:
+        """Persist verified user-level token material."""
+
+
 @dataclass(frozen=True, slots=True)
 class PendingAuth:
     """One short-lived, single-use OAuth authorization request."""
 
     nonce: str
     principal_id: str
+    actor_id: str
     session_id: str
     service: str
     scopes: tuple[str, ...]
@@ -62,11 +86,23 @@ class OAuthUserToken:
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthUserIdentity:
+    """DingTalk identity proven by calling `contact/users/me` with the user token."""
+
+    union_id: str
+    user_id: str | None = None
+    name: str | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthCallbackResult:
-    """Authorized pending request plus the exchanged DingTalk user token."""
+    """Verified pending request plus the exchanged and stored DingTalk user token."""
 
     pending: PendingAuth
     token: OAuthUserToken
+    identity: OAuthUserIdentity | None = None
+    stored_token: UserToken | None = field(default=None, repr=False)
 
 
 class PendingAuthStore:
@@ -88,6 +124,7 @@ class PendingAuthStore:
         *,
         nonce: str,
         principal: str,
+        actor: str | None = None,
         session: str,
         service: str,
         scopes: Sequence[str],
@@ -97,9 +134,15 @@ class PendingAuthStore:
 
         now = _to_utc(self._now_factory())
         normalized_nonce = _non_empty_string(nonce, "nonce")
+        normalized_principal = _non_empty_string(principal, "principal")
         pending = PendingAuth(
             nonce=normalized_nonce,
-            principal_id=_non_empty_string(principal, "principal"),
+            principal_id=normalized_principal,
+            actor_id=(
+                _non_empty_string(actor, "actor")
+                if actor is not None
+                else _actor_from_principal(normalized_principal)
+            ),
             session_id=_non_empty_string(session, "session"),
             service=_non_empty_string(service, "service"),
             scopes=_normalize_scopes(scopes),
@@ -221,6 +264,34 @@ class DingTalkOAuthClient:
             path=USER_ACCESS_TOKEN_PATH,
         )
 
+    async def get_current_user(self, user_access_token: str) -> OAuthUserIdentity:
+        """Fetch the DingTalk identity represented by one user-level token."""
+
+        try:
+            response = await self._http_client.get(
+                self._build_url(CONTACT_USER_ME_PATH),
+                headers={
+                    TOKEN_HEADER: _non_empty_string(user_access_token, "user_access_token"),
+                },
+            )
+        except httpx.HTTPError:
+            logger.exception(
+                "dingtalk_oauth_current_user_request_failed",
+                extra={"method": "GET", "path": CONTACT_USER_ME_PATH},
+            )
+            raise
+
+        payload = parse_dingtalk_response(
+            response,
+            method="GET",
+            path=CONTACT_USER_ME_PATH,
+        )
+        return _parse_current_user_payload(
+            payload,
+            method="GET",
+            path=CONTACT_USER_ME_PATH,
+        )
+
     def _build_url(self, path: str) -> str:
         return f"{self._config.api_base.rstrip('/')}/{path.lstrip('/')}"
 
@@ -233,12 +304,14 @@ class OAuthRequestHandler:
         *,
         config: AppConfig,
         pending_store: PendingAuthStore,
+        token_vault: OAuthTokenVault,
         oauth_client: DingTalkOAuthClient | None = None,
         authorization_url: str = AUTHORIZATION_URL,
         on_authorized: Callable[[OAuthCallbackResult], Awaitable[None] | None] | None = None,
     ) -> None:
         self._config = config
         self._pending_store = pending_store
+        self._token_vault = token_vault
         self._oauth_client = oauth_client or DingTalkOAuthClient(config.dingtalk)
         self._owns_oauth_client = oauth_client is None
         self._authorization_url = _non_empty_string(authorization_url, "authorization_url")
@@ -282,12 +355,41 @@ class OAuthRequestHandler:
             raise web.HTTPGone(text="Expired OAuth state") from None
 
         token = await self._oauth_client.exchange_authorization_code(code)
-        result = OAuthCallbackResult(pending=pending, token=token)
+        identity = await self._oauth_client.get_current_user(token.access_token)
+        if identity.union_id != pending.actor_id:
+            logger.warning(
+                "dingtalk_oauth_identity_mismatch",
+                extra={
+                    "principal_id": pending.principal_id,
+                    "actor_id": pending.actor_id,
+                    "authorized_union_id": identity.union_id,
+                    "session_id": pending.session_id,
+                    "service": pending.service,
+                },
+            )
+            raise web.HTTPForbidden(text=OAUTH_IDENTITY_MISMATCH_MESSAGE)
+
+        stored_token = await self._token_vault.put(
+            principal=pending.principal_id,
+            service=pending.service,
+            user_access_token=token.access_token,
+            refresh_token=token.refresh_token,
+            scopes=pending.scopes,
+            expires_at=token.expires_at,
+        )
+        result = OAuthCallbackResult(
+            pending=pending,
+            token=token,
+            identity=identity,
+            stored_token=stored_token,
+        )
         await self._notify_authorized(result)
         logger.info(
             "dingtalk_oauth_callback_completed",
             extra={
                 "principal_id": pending.principal_id,
+                "actor_id": pending.actor_id,
+                "authorized_union_id": identity.union_id,
                 "session_id": pending.session_id,
                 "service": pending.service,
                 "scopes": list(pending.scopes),
@@ -312,6 +414,7 @@ def create_oauth_app(
     config: AppConfig,
     pending_store: PendingAuthStore,
     *,
+    token_vault: OAuthTokenVault,
     oauth_client: DingTalkOAuthClient | None = None,
     authorization_url: str = AUTHORIZATION_URL,
     on_authorized: Callable[[OAuthCallbackResult], Awaitable[None] | None] | None = None,
@@ -321,6 +424,7 @@ def create_oauth_app(
     handler = OAuthRequestHandler(
         config=config,
         pending_store=pending_store,
+        token_vault=token_vault,
         oauth_client=oauth_client,
         authorization_url=authorization_url,
         on_authorized=on_authorized,
@@ -397,6 +501,28 @@ def _parse_user_token_payload(
     )
 
 
+def _parse_current_user_payload(
+    payload: Any,
+    *,
+    method: str,
+    path: str,
+) -> OAuthUserIdentity:
+    payload_object = _response_object(payload, method=method, path=path)
+    if isinstance(payload_object.get("result"), Mapping):
+        payload_object = _response_object(payload_object["result"], method=method, path=path)
+
+    union_id = _string_field(payload_object, "unionId", "unionid", "union_id")
+    if union_id is None:
+        raise _invalid_current_user_response(method=method, path=path)
+
+    return OAuthUserIdentity(
+        union_id=union_id,
+        user_id=_string_field(payload_object, "userId", "userid", "staffId", "staffid"),
+        name=_string_field(payload_object, "name", "username", "nick", "nickname"),
+        raw=dict(payload_object),
+    )
+
+
 def _invalid_user_token_response(*, method: str, path: str) -> DingTalkAPIError:
     logger.error(
         "dingtalk_user_token_response_invalid",
@@ -411,10 +537,51 @@ def _invalid_user_token_response(*, method: str, path: str) -> DingTalkAPIError:
     )
 
 
+def _invalid_current_user_response(*, method: str, path: str) -> DingTalkAPIError:
+    logger.error(
+        "dingtalk_current_user_response_invalid",
+        extra={"method": method, "path": path, "status_code": 200},
+    )
+    return DingTalkAPIError(
+        method=method,
+        path=path,
+        status_code=200,
+        errcode=None,
+        errmsg="current user response must include unionId",
+    )
+
+
+def _response_object(payload: Any, *, method: str, path: str) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="DingTalk response must be a JSON object",
+        )
+    return payload
+
+
+def _string_field(mapping: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip() != "":
+            return value.strip()
+    return None
+
+
 def _normalize_scopes(scopes: Sequence[str]) -> tuple[str, ...]:
     if isinstance(scopes, (str, bytes)):
         raise ValueError("scopes must be a sequence of strings")
     return tuple(dict.fromkeys(_non_empty_string(scope, "scope") for scope in scopes))
+
+
+def _actor_from_principal(principal: str) -> str:
+    normalized = _non_empty_string(principal, "principal")
+    if normalized.startswith("user:") and normalized != "user:":
+        return normalized.removeprefix("user:")
+    return normalized
 
 
 def _non_empty_string(value: str, field_name: str) -> str:

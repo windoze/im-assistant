@@ -280,10 +280,17 @@
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
   - 当前环境缺少真实钉钉 OAuth 登录回调公网 HTTPS/隧道和可用 `.env` 凭据,未执行外部浏览器人工授权;具备 `OAUTH_REDIRECT_URI` 公网回调、应用 OAuth 登录配置和凭据后可通过 `PendingAuthStore` 预置 nonce 后访问 `/oauth/start?nonce=...` 进行人工验收。
 
-## T22 `[TODO]` 身份核对与 TokenVault 落库
+## [DONE] T22 身份核对与 TokenVault 落库
 - 回调拿到 user token 后:调 `GET /v1.0/contact/users/me`(带用户 token)取 `unionId`;核对 == pending 里记录的 actor 身份(架构 §7.2),不符则拒绝并作废 nonce。
 - 核对通过 → 写入 TokenVault;唤醒挂起的会话(resume)。
 - **验收**:用他人账号完成授权会被拒(人工构造验证);本人授权成功落库。
+- **完成记录(2026-07-07)**:
+  - 已扩展 `PendingAuth` 记录待授权 actor 身份,OAuth callback 在授权码换取 user token 后使用该 token 调 `GET /v1.0/contact/users/me`,以返回的 `unionId` 严格核对 pending actor。
+  - 身份不匹配时返回 403,不写入 TokenVault、不触发 resume callback,且 state nonce 已单次消费作废;身份匹配时将 access/refresh token、service、scopes、expires_at 写入加密 TokenVault。
+  - 已将 `OAuthCallbackResult` 补充为包含已核验 identity 与已落库 token,供后续挂起会话 resume 使用;README 已更新 OAuth callback 的身份核对与落库契约。
+  - 已补充单测覆盖本人授权成功、他人账号授权拒绝、`contact/users/me` 缺 `unionId` 拒绝、nonce 单次消费、真实 TokenVault 落库和 resume callback 数据。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_oauth.py -q`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
+  - 当前环境缺少真实钉钉 OAuth 登录回调公网 HTTPS/隧道和可用 `.env` 凭据,未执行外部浏览器人工授权;本人/他人授权路径已通过 mock DingTalk OAuth 与 `contact/users/me` 响应构造验证。
 
 ## T23 `[TODO]` 静默刷新
 - `infra/dingtalk_client.py`/`token_vault`:用户 token 过期时用 `grantType=refresh_token`+refreshToken 换新;刷新失败(refresh 失效)→ 清 vault 条目,标记需重新授权。

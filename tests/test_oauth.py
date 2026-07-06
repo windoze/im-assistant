@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -25,6 +26,8 @@ from src.infra.config import (
 )
 from src.infra.dingtalk_client import DingTalkAPIError
 from src.infra.oauth import (
+    CONTACT_USER_ME_PATH,
+    OAUTH_IDENTITY_MISMATCH_MESSAGE,
     OAUTH_SUCCESS_MESSAGE,
     USER_ACCESS_TOKEN_PATH,
     DingTalkOAuthClient,
@@ -35,6 +38,8 @@ from src.infra.oauth import (
     build_authorization_url,
     create_oauth_app,
 )
+from src.infra.store import SQLiteStore
+from src.infra.token_vault import TokenVault, UserToken
 
 
 @pytest.mark.asyncio
@@ -108,6 +113,7 @@ async def test_start_endpoint_redirects_to_dingtalk_authorization_url() -> None:
     app = create_oauth_app(
         _app_config(),
         store,
+        token_vault=RecordingTokenVault(),
         authorization_url="https://login.example.com/oauth2/auth",
     )
 
@@ -142,10 +148,12 @@ async def test_callback_consumes_state_and_exchanges_code_for_user_token() -> No
     now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     requests: list[httpx.Request] = []
     authorized: list[OAuthCallbackResult] = []
+    token_vault = RecordingTokenVault()
     store = PendingAuthStore()
     pending = await store.create(
         nonce="nonce-1",
         principal="principal-1",
+        actor="union-1",
         session="session-1",
         service="calendar",
         scopes=("calendar:read",),
@@ -153,22 +161,30 @@ async def test_callback_consumes_state_and_exchanges_code_for_user_token() -> No
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        assert request.method == "POST"
-        assert request.url.path == USER_ACCESS_TOKEN_PATH
-        assert json.loads(request.content) == {
-            "clientId": "app-key",
-            "clientSecret": "app-secret",
-            "code": "auth-code",
-            "grantType": "authorization_code",
-        }
-        return httpx.Response(
-            200,
-            json={
-                "accessToken": "user-access-token",
-                "refreshToken": "user-refresh-token",
-                "expireIn": 7200,
-            },
-        )
+        if request.url.path == USER_ACCESS_TOKEN_PATH:
+            assert request.method == "POST"
+            assert json.loads(request.content) == {
+                "clientId": "app-key",
+                "clientSecret": "app-secret",
+                "code": "auth-code",
+                "grantType": "authorization_code",
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "accessToken": "user-access-token",
+                    "refreshToken": "user-refresh-token",
+                    "expireIn": 7200,
+                },
+            )
+        if request.url.path == CONTACT_USER_ME_PATH:
+            assert request.method == "GET"
+            assert request.headers["x-acs-dingtalk-access-token"] == "user-access-token"
+            return httpx.Response(
+                200,
+                json={"unionId": "union-1", "userId": "staff-1", "name": "Alice"},
+            )
+        raise AssertionError(f"unexpected request path: {request.url.path}")
 
     async def on_authorized(result: OAuthCallbackResult) -> None:
         authorized.append(result)
@@ -182,6 +198,7 @@ async def test_callback_consumes_state_and_exchanges_code_for_user_token() -> No
         app = create_oauth_app(
             _app_config(),
             store,
+            token_vault=token_vault,
             oauth_client=oauth_client,
             on_authorized=on_authorized,
         )
@@ -194,12 +211,29 @@ async def test_callback_consumes_state_and_exchanges_code_for_user_token() -> No
     assert response.status == 200
     assert response_text == OAUTH_SUCCESS_MESSAGE
     assert replay.status == 404
-    assert len(requests) == 1
+    assert [request.url.path for request in requests] == [
+        USER_ACCESS_TOKEN_PATH,
+        CONTACT_USER_ME_PATH,
+    ]
     assert authorized[0].pending == pending
     assert authorized[0].token.access_token == "user-access-token"
     assert authorized[0].token.refresh_token == "user-refresh-token"
     assert authorized[0].token.expire_in == 7200
     assert authorized[0].token.expires_at == now + timedelta(seconds=7200)
+    assert authorized[0].identity is not None
+    assert authorized[0].identity.union_id == "union-1"
+    assert authorized[0].stored_token is not None
+    assert authorized[0].stored_token.user_access_token == "user-access-token"
+    assert token_vault.calls == [
+        {
+            "principal": "principal-1",
+            "service": "calendar",
+            "user_access_token": "user-access-token",
+            "refresh_token": "user-refresh-token",
+            "scopes": ("calendar:read",),
+            "expires_at": now + timedelta(seconds=7200),
+        }
+    ]
     assert await store.get("nonce-1") is None
 
 
@@ -231,12 +265,136 @@ async def test_callback_rejects_expired_state_without_exchanging_code() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         oauth_client = DingTalkOAuthClient(_dingtalk_config(), http_client=http_client)
-        app = create_oauth_app(_app_config(), store, oauth_client=oauth_client)
+        app = create_oauth_app(
+            _app_config(),
+            store,
+            token_vault=RecordingTokenVault(),
+            oauth_client=oauth_client,
+        )
         async with TestClient(TestServer(app)) as client:
             response = await client.get("/oauth/callback?code=auth-code&state=nonce-1")
 
     assert response.status == 410
     assert request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_authorization_from_a_different_dingtalk_user() -> None:
+    """The OAuth callback must reject tokens whose `me` unionId is not the pending actor."""
+
+    token_vault = RecordingTokenVault()
+    authorized: list[OAuthCallbackResult] = []
+    store = PendingAuthStore()
+    await store.create(
+        nonce="nonce-1",
+        principal="principal-1",
+        actor="union-expected",
+        session="session-1",
+        service="calendar",
+        scopes=("calendar:read",),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == USER_ACCESS_TOKEN_PATH:
+            return httpx.Response(
+                200,
+                json={
+                    "accessToken": "user-access-token",
+                    "refreshToken": "user-refresh-token",
+                    "expireIn": 7200,
+                },
+            )
+        if request.url.path == CONTACT_USER_ME_PATH:
+            assert request.headers["x-acs-dingtalk-access-token"] == "user-access-token"
+            return httpx.Response(200, json={"unionId": "union-other"})
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async def on_authorized(result: OAuthCallbackResult) -> None:
+        authorized.append(result)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        oauth_client = DingTalkOAuthClient(_dingtalk_config(), http_client=http_client)
+        app = create_oauth_app(
+            _app_config(),
+            store,
+            token_vault=token_vault,
+            oauth_client=oauth_client,
+            on_authorized=on_authorized,
+        )
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/oauth/callback?code=auth-code&state=nonce-1")
+            response_text = await response.text()
+            replay = await client.get("/oauth/callback?code=auth-code&state=nonce-1")
+
+    assert response.status == 403
+    assert response_text == OAUTH_IDENTITY_MISMATCH_MESSAGE
+    assert replay.status == 404
+    assert token_vault.calls == []
+    assert authorized == []
+    assert await store.get("nonce-1") is None
+
+
+@pytest.mark.asyncio
+async def test_callback_persists_verified_token_to_token_vault(tmp_path) -> None:
+    """A verified OAuth callback should store encrypted delegated tokens for the pending grant."""
+
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    store = PendingAuthStore()
+    await store.create(
+        nonce="nonce-1",
+        principal="user:staff-1",
+        actor="union-1",
+        session="dingtalk:dm:conversation-1",
+        service="calendar",
+        scopes=("calendar:read", "calendar:read"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == USER_ACCESS_TOKEN_PATH:
+            return httpx.Response(
+                200,
+                json={
+                    "accessToken": "user-access-token",
+                    "refreshToken": "user-refresh-token",
+                    "expireIn": 7200,
+                },
+            )
+        if request.url.path == CONTACT_USER_ME_PATH:
+            return httpx.Response(200, json={"result": {"unionId": "union-1"}})
+        raise AssertionError(f"unexpected request path: {request.url.path}")
+
+    async with SQLiteStore(tmp_path / "assistant.db") as sqlite_store:
+        await sqlite_store.initialize()
+        vault = TokenVault(
+            sqlite_store,
+            fernet_key=Fernet.generate_key().decode("utf-8"),
+            now_factory=lambda: now,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            oauth_client = DingTalkOAuthClient(
+                _dingtalk_config(),
+                http_client=http_client,
+                now_factory=lambda: now,
+            )
+            app = create_oauth_app(
+                _app_config(),
+                store,
+                token_vault=vault,
+                oauth_client=oauth_client,
+            )
+            async with TestClient(TestServer(app)) as client:
+                response = await client.get("/oauth/callback?code=auth-code&state=nonce-1")
+
+        stored = await vault.get("user:staff-1", "calendar")
+
+    assert response.status == 200
+    assert stored is not None
+    assert stored.principal_id == "user:staff-1"
+    assert stored.service == "calendar"
+    assert stored.user_access_token == "user-access-token"
+    assert stored.refresh_token == "user-refresh-token"
+    assert stored.scopes == ("calendar:read",)
+    assert stored.expires_at == now + timedelta(seconds=7200)
 
 
 @pytest.mark.asyncio
@@ -250,6 +408,20 @@ async def test_user_token_exchange_rejects_malformed_payload() -> None:
         oauth_client = DingTalkOAuthClient(_dingtalk_config(), http_client=http_client)
         with pytest.raises(DingTalkAPIError, match="user token response"):
             await oauth_client.exchange_authorization_code("auth-code")
+
+
+@pytest.mark.asyncio
+async def test_current_user_lookup_requires_union_id() -> None:
+    """The current-user lookup must surface malformed identity responses."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == CONTACT_USER_ME_PATH
+        return httpx.Response(200, json={"userId": "staff-1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        oauth_client = DingTalkOAuthClient(_dingtalk_config(), http_client=http_client)
+        with pytest.raises(DingTalkAPIError, match="current user response"):
+            await oauth_client.get_current_user("user-access-token")
 
 
 def _app_config() -> AppConfig:
@@ -277,3 +449,40 @@ def _dingtalk_config() -> DingTalkConfig:
 
 def _oauth_config() -> OAuthConfig:
     return OAuthConfig(redirect_uri="https://assistant.example.com/oauth/callback")
+
+
+class RecordingTokenVault:
+    """In-memory TokenVault test double that records verified OAuth writes."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def put(
+        self,
+        *,
+        principal: str,
+        service: str,
+        user_access_token: str,
+        refresh_token: str | None,
+        scopes: Sequence[str],
+        expires_at: datetime | None,
+    ) -> UserToken:
+        normalized_scopes = tuple(scopes)
+        self.calls.append(
+            {
+                "principal": principal,
+                "service": service,
+                "user_access_token": user_access_token,
+                "refresh_token": refresh_token,
+                "scopes": normalized_scopes,
+                "expires_at": expires_at,
+            }
+        )
+        return UserToken(
+            principal_id=principal,
+            service=service,
+            user_access_token=user_access_token,
+            refresh_token=refresh_token,
+            scopes=normalized_scopes,
+            expires_at=expires_at,
+        )

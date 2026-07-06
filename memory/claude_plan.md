@@ -15,9 +15,19 @@ I will follow `TODO.md` as the authoritative source and complete exactly the fir
 
 ## Progress
 
-- Initialized plan before executing repository commands.
-- Identified first incomplete task: `T21 钉钉 OAuth2 端点与 code 换 token`.
-- Latest commit is `[T20] Implement encrypted TokenVault`, which directly precedes T21 and does not add an unfinished blocker.
-- Planned implementation: add `src/infra/oauth.py` with `PendingAuthStore`, DingTalk authorization URL construction, `/oauth/start` and `/oauth/callback` aiohttp handlers, and code-to-user-token exchange; add targeted tests and documentation/config updates.
-- Implemented the OAuth module, added aiohttp as a runtime dependency, documented the endpoint contract, and installed the updated editable package.
-- Fixed validation issues from the first full test run; formatting, linting, pytest, and the application entry point now pass.
+- Initialized plan before implementation work.
+- Identified first incomplete task: `T22 身份核对与 TokenVault 落库`.
+- Latest commit is `[T21] Implement DingTalk OAuth code exchange`, which directly precedes T22 and does not mention an unfinished blocker.
+- Planned implementation:
+  1. Inspect the T21 OAuth callback result and T20 TokenVault APIs.
+  2. Add callback identity verification by calling `GET /v1.0/contact/users/me` with the user token and comparing `unionId` to the pending actor identity.
+  3. Persist verified OAuth tokens into TokenVault under the pending principal/service/scopes.
+  4. Expose a resume hook for the authorized pending session without coupling T22 to later M5 interaction primitives.
+  5. Add tests for self-authorization success, cross-account rejection, nonce single-use behavior, TokenVault persistence, and resume callback invocation.
+  6. Run formatting, linting, tests, and entry-point validation.
+  7. Mark T22 `[DONE]` in `TODO.md`, record completion details, commit, and stop.
+- Implemented pending actor identity, `contact/users/me` verification, TokenVault persistence, and resume callback result enrichment in `src/infra/oauth.py`.
+- Updated OAuth tests to cover successful self-authorization, rejected cross-account authorization, malformed `users/me` responses, state single-use behavior, real TokenVault persistence, and resume callback payloads.
+- Updated README to document the verified OAuth callback and TokenVault write contract.
+- Validation completed successfully: `ruff format`, `ruff check`, OAuth tests, full pytest suite, and `python -m src.main`.
+- Marked `T22 身份核对与 TokenVault 落库` as `[DONE]` in `TODO.md` with a completion record.
