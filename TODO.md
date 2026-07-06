@@ -70,10 +70,15 @@
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python scripts/smoke_send.py --help`。
   - 真实钉钉发送冒烟需具备本地 `.env` 凭据和目标 `userId`;当前环境未配置 `DINGTALK_SMOKE_USER_ID`,未执行对真实账号的发送。
 
-## T05 `[TODO]` 【REVIEW】M0 骨架与钉钉接入审阅
+## [DONE] T05 【REVIEW】M0 骨架与钉钉接入审阅
 - 审阅 T01–T04:目录/依赖是否符合 PLAN.md §3;token 缓存与刷新是否正确、并发安全;密钥是否只从配置读取无硬编码;错误处理是否完整;日志是否结构化。
 - 跑 `ruff` + `pytest`,确认无告警、用例通过。
 - 输出问题清单并修复;确认冒烟脚本真实可用。
+- **完成记录(2026-07-07)**:
+  - 已审阅 T01–T04 的项目目录、依赖、配置/日志、钉钉 access_token 缓存与提前刷新、并发锁、应用/用户 token 请求头、OpenAPI 错误记录与冒烟脚本。
+  - 问题清单:冒烟脚本前序完成记录引用 `DINGTALK_SMOKE_USER_ID`,但脚本、`.env.example` 和 README 未支持/说明该可重复本地冒烟入口。已修复为可选 positional `user_id`,缺省时从环境变量或 `.env` 读取 `DINGTALK_SMOKE_USER_ID`,并补充单测与文档。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python scripts/smoke_send.py --help`。
+  - 当前环境无 `.env` 和真实 `DINGTALK_SMOKE_USER_ID`,未对外部钉钉账号执行真实发送;脚本所需凭据、机器人发消息权限和通讯录读取权限已在 README 中明确。
 
 ---
 

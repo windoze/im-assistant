@@ -30,8 +30,16 @@ Run tests:
 pytest
 ```
 
-Send a DingTalk robot smoke-test message and print the contact mapping:
+Send a DingTalk robot smoke-test message and print the contact mapping. This requires a populated
+`.env` with DingTalk credentials, robot messaging permission, and contact-read permission:
 
 ```bash
 python scripts/smoke_send.py <userId>
+```
+
+For repeatable local smoke runs, set `DINGTALK_SMOKE_USER_ID` in `.env` and omit the positional
+argument:
+
+```bash
+python scripts/smoke_send.py
 ```
