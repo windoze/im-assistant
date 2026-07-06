@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -62,6 +63,13 @@ class StorageConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilitiesConfig:
+    """Capability visibility settings controlled outside source code."""
+
+    channel_enabled_capabilities: Mapping[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
 class LoggingConfig:
     """Structured logging settings."""
 
@@ -83,6 +91,7 @@ class AppConfig:
     llm: LLMConfig
     session: SessionConfig
     storage: StorageConfig
+    capabilities: CapabilitiesConfig
     logging: LoggingConfig
     oauth: OAuthConfig
 
@@ -108,6 +117,7 @@ def load_config(
     llm_section = _section(raw_config, "llm")
     session_section = _section(raw_config, "session")
     storage_section = _section(raw_config, "storage")
+    capabilities_section = _section(raw_config, "capabilities")
     logging_section = _section(raw_config, "logging")
 
     return AppConfig(
@@ -136,6 +146,9 @@ def load_config(
                 "im_assistant.db",
                 base_dir=config_file.parent,
             ),
+        ),
+        capabilities=CapabilitiesConfig(
+            channel_enabled_capabilities=_channel_enabled_capabilities(capabilities_section),
         ),
         logging=LoggingConfig(
             level=_non_empty_string(logging_section, "level", "INFO").upper(),
@@ -210,6 +223,31 @@ def _path_value(section: Mapping[str, Any], key: str, default: str, *, base_dir:
     return path
 
 
+def _channel_enabled_capabilities(section: Mapping[str, Any]) -> Mapping[str, tuple[str, ...]]:
+    raw_mapping = section.get("channel_enabled", {})
+    if raw_mapping is None:
+        return MappingProxyType({})
+    if not isinstance(raw_mapping, Mapping):
+        raise ConfigError("`capabilities.channel_enabled` must be a mapping")
+
+    enabled_by_channel: dict[str, tuple[str, ...]] = {}
+    for raw_channel_id, raw_capabilities in raw_mapping.items():
+        channel_id = _config_string(raw_channel_id, "capabilities.channel_enabled channel id")
+        if isinstance(raw_capabilities, str) or not isinstance(raw_capabilities, Sequence):
+            raise ConfigError(
+                f"`capabilities.channel_enabled.{channel_id}` must be a sequence of "
+                "capability names"
+            )
+        capability_names = tuple(
+            dict.fromkeys(
+                _config_string(name, f"capabilities.channel_enabled.{channel_id}")
+                for name in raw_capabilities
+            )
+        )
+        enabled_by_channel[channel_id] = capability_names
+    return MappingProxyType(enabled_by_channel)
+
+
 def _positive_int(section: Mapping[str, Any], key: str, default: int) -> int:
     value = section.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -217,3 +255,9 @@ def _positive_int(section: Mapping[str, Any], key: str, default: int) -> int:
     if value <= 0:
         raise ConfigError(f"`{key}` must be greater than 0")
     return value
+
+
+def _config_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or value.strip() == "":
+        raise ConfigError(f"`{field_name}` must be a non-empty string")
+    return value.strip()

@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 
 from src.capabilities import (
     Capability,
+    CapabilityChannelContext,
     CapabilityRegistry,
     CapabilityRegistryError,
     Requirement,
+    can_use,
     load_capabilities_from_directory,
     load_capability_registry,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ActorStub:
+    """Minimal actor context used by visibility-gate tests."""
+
+    id: str
 
 
 def test_capability_model_normalizes_metadata_and_detects_user_authority() -> None:
@@ -63,6 +74,45 @@ def test_registry_registers_replaces_and_lists_capabilities() -> None:
     assert registry.names() == ["echo", "shared"]
     assert registry.get("shared") == replacement
     assert registry.list() == [other, replacement]
+
+
+def test_can_use_matches_architecture_visibility_gate() -> None:
+    """The pure visibility gate should follow architecture §6.1 exactly."""
+
+    actor = ActorStub(id="user-1")
+    channel = CapabilityChannelContext(id="group-1", enabled_capabilities=["group_tool"])
+    global_cap = Capability(name="global_tool", origin="system", available_in=["global"])
+    obo_global_cap = Capability(
+        name="obo_global",
+        origin="system",
+        available_in=["global"],
+        requires=[Requirement(service="calendar", on_behalf_of="actor")],
+    )
+    owned_private_cap = Capability(
+        name="private_owned",
+        origin="user",
+        available_in=["dm"],
+        owner_id="user-1",
+    )
+    other_private_cap = Capability(
+        name="private_other",
+        origin="user",
+        available_in=["dm"],
+        owner_id="user-2",
+    )
+    group_cap = Capability(name="group_tool", origin="system", available_in=["group"])
+    disabled_group_cap = Capability(name="disabled_group", origin="system", available_in=["group"])
+    dm_system_cap = Capability(name="dm_system", origin="system", available_in=["dm"])
+
+    assert can_use(global_cap, "dm", actor, None) is True
+    assert can_use(global_cap, "group", actor, channel) is True
+    assert can_use(obo_global_cap, "group", actor, channel) is False
+    assert can_use(obo_global_cap, "dm", actor, None) is True
+    assert can_use(owned_private_cap, "dm", actor, None) is True
+    assert can_use(other_private_cap, "dm", actor, None) is False
+    assert can_use(group_cap, "group", actor, channel) is True
+    assert can_use(disabled_group_cap, "group", actor, channel) is False
+    assert can_use(dm_system_cap, "dm", actor, None) is False
 
 
 def test_three_tier_loader_overlays_user_base_and_system_capabilities(tmp_path) -> None:

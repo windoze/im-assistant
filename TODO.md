@@ -203,12 +203,17 @@
   - 已补充单测覆盖模型校验、OBO requirement 判定、注册/覆盖/列出、三级叠加顺序、目录缺失和声明 origin 与目录层级不一致的错误处理;README 已补充能力注册说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`。
 
-## T16 `[TODO]` 可见性闸门 canUse
+## [DONE] T16 可见性闸门 canUse
 - `capabilities/registry.py` 加 `can_use(cap, mode, actor, channel) -> bool`,**纯函数**,逻辑严格按架构 §6.1:
   - `requires_user_authority`(= requires 中有 on_behalf_of 项)且 mode≠DM → False。
   - global → True;DM 且 origin=user 且 actor 拥有 → True;Group 且在 channel.enabledCaps → True;否则 False。
 - `channel → enabled capabilities` 配置读取(架构 §6.2)。
 - **验收**:单测覆盖 §6.1 每条分支;OBO 类能力在群聊被过滤。
+- **完成记录(2026-07-07)**:
+  - 已在 `src.capabilities.registry` 实现纯函数 `can_use(capability, mode, actor, channel)`,严格按架构 §6.1 先过滤非 DM 的 OBO 能力,再处理 global、DM 用户私有能力归属和群 enabled capabilities。
+  - 已新增 `CapabilityChannelContext` 与导出项,用于承载群聊 `enabled_capabilities`;已在 `infra/config.py` 增加 `capabilities.channel_enabled` 配置读取,默认 `config.yaml` 为空映射。
+  - 已补充单测覆盖 §6.1 每条分支、群聊 OBO 过滤和无效 channel-enabled 配置;README 已说明能力可见性规则和群能力配置位置。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T17 `[TODO]` agent loop 接入工具执行(Claude tool use)
 - `core/agent_loop.py`:把 `can_use` 过滤后的能力转成 Claude tool 定义;LLM 请求工具 → 执行 handler → 回填结果 → 继续循环,直到无工具调用。

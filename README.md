@@ -48,7 +48,10 @@ and encrypted token material.
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and
 `src/capabilities/user/<userId>/` in that order, so later tiers override earlier capabilities with
-the same name.
+the same name. Visibility is filtered by `src.capabilities.can_use(...)`: capabilities requiring
+on-behalf-of user authority are hidden outside DMs, globally available capabilities are visible
+everywhere, user capabilities are visible only to their owner in DM, and group capabilities must be
+listed under `capabilities.channel_enabled.<channel_id>` in `config.yaml`.
 
 Run tests:
 

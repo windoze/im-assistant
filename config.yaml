@@ -7,6 +7,9 @@ session:
 storage:
   database_path: im_assistant.db
 
+capabilities:
+  channel_enabled: {}
+
 dingtalk:
   api_base: https://api.dingtalk.com
   legacy_api_base: https://oapi.dingtalk.com

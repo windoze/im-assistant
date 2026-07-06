@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import ModuleType
+from typing import Literal, Protocol
 
 from src.capabilities.base import Capability, CapabilityOrigin
 
@@ -14,6 +15,34 @@ DEFAULT_SYSTEM_DIR = Path(__file__).with_name("system")
 DEFAULT_BASE_DIR = Path(__file__).with_name("base")
 DEFAULT_USER_ROOT = Path(__file__).with_name("user")
 CAPABILITY_EXPORT_NAMES = ("CAPABILITIES", "capabilities", "CAPABILITY", "capability")
+CapabilityMode = Literal["dm", "group"]
+
+
+class CapabilityActorContext(Protocol):
+    """Actor shape required by the capability visibility gate."""
+
+    id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityChannelContext:
+    """Group channel capability switches loaded from administrator configuration."""
+
+    id: str
+    enabled_capabilities: Iterable[str] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        """Normalize the channel id and enabled capability names."""
+
+        object.__setattr__(self, "id", _non_empty_string(self.id, "channel.id"))
+        object.__setattr__(
+            self,
+            "enabled_capabilities",
+            frozenset(
+                _non_empty_string(name, "channel.enabled_capabilities")
+                for name in self.enabled_capabilities
+            ),
+        )
 
 
 class CapabilityRegistryError(RuntimeError):
@@ -49,6 +78,31 @@ class CapabilityRegistry:
         """Return registered capability names in deterministic order."""
 
         return sorted(self._capabilities)
+
+
+def can_use(
+    capability: Capability,
+    mode: CapabilityMode,
+    actor: CapabilityActorContext,
+    channel: CapabilityChannelContext | None,
+) -> bool:
+    """Return whether a capability passes the architecture §6.1 visibility gate."""
+
+    if not isinstance(capability, Capability):
+        raise TypeError("capability must be a Capability instance")
+    if mode not in ("dm", "group"):
+        raise ValueError("mode must be 'dm' or 'group'")
+
+    actor_id = _non_empty_string(getattr(actor, "id", None), "actor.id")
+    if capability.requires_user_authority and mode != "dm":
+        return False
+    if "global" in capability.available_in:
+        return True
+    if mode == "dm" and capability.origin == "user":
+        return capability.owner_id == actor_id
+    if mode == "group" and channel is not None:
+        return capability.name in channel.enabled_capabilities
+    return False
 
 
 def load_capability_registry(
@@ -164,6 +218,12 @@ def _capability_for_tier(
     return capability
 
 
+def _non_empty_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
 def _load_module_from_file(path: Path) -> ModuleType:
     module_name = f"_im_assistant_capability_{abs(hash(path.resolve()))}"
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -178,8 +238,12 @@ def _load_module_from_file(path: Path) -> ModuleType:
 
 
 __all__ = [
+    "CapabilityActorContext",
+    "CapabilityChannelContext",
+    "CapabilityMode",
     "CapabilityRegistry",
     "CapabilityRegistryError",
+    "can_use",
     "load_capabilities_from_directory",
     "load_capability_registry",
 ]
