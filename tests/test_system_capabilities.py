@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from src.capabilities import Capability, load_capability_registry
+from src.capabilities import (
+    Capability,
+    CredentialContext,
+    CredentialHandle,
+    Requirement,
+    can_use,
+    load_capability_registry,
+)
 from src.capabilities.system.contact_lookup import CAPABILITY as CONTACT_LOOKUP
 from src.capabilities.system.create_doc import CAPABILITY as CREATE_DOC
 from src.capabilities.system.create_todo import CAPABILITY as CREATE_TODO
+from src.capabilities.system.schedule_summary import CAPABILITY as SCHEDULE_SUMMARY
 from src.core import (
     Actor,
     BotIdentity,
@@ -18,7 +27,13 @@ from src.core import (
     Principal,
     Session,
 )
-from src.infra.dingtalk_client import DingTalkDocument, DingTalkTodo, DingTalkUser
+from src.infra.dingtalk_client import (
+    DingTalkCalendar,
+    DingTalkCalendarEvent,
+    DingTalkDocument,
+    DingTalkTodo,
+    DingTalkUser,
+)
 
 
 def test_system_registry_loads_t18_application_tools() -> None:
@@ -26,11 +41,23 @@ def test_system_registry_loads_t18_application_tools() -> None:
 
     registry = load_capability_registry()
 
-    assert {"contact_lookup", "create_doc", "create_todo"}.issubset(registry.names())
+    assert {"contact_lookup", "create_doc", "create_todo", "schedule_summary"}.issubset(
+        registry.names()
+    )
     create_doc = registry.get("create_doc")
     assert create_doc is not None
     assert create_doc.available_in == ("dm", "group")
     assert create_doc.requires == ()
+    schedule_summary = registry.get("schedule_summary")
+    assert schedule_summary is not None
+    assert schedule_summary.available_in == ("dm",)
+    assert schedule_summary.requires == (
+        Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor"),
+    )
+    assert can_use(schedule_summary, "dm", Actor(id="user-1", display_name="Alice"), None) is True
+    assert (
+        can_use(schedule_summary, "group", Actor(id="user-1", display_name="Alice"), None) is False
+    )
 
 
 @pytest.mark.asyncio
@@ -157,6 +184,60 @@ async def test_create_todo_resolves_actor_union_id_and_creates_task() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_schedule_summary_reads_actor_calendar_and_summarizes() -> None:
+    """The OBO schedule tool should read `me` calendar events with the granted user token."""
+
+    client = FakeDingTalkToolClient()
+    llm_client = FakeScheduleLLM("今天上午有晨会，下午有评审。")
+    session = _session()
+    credentials = CredentialContext.for_session(
+        session,
+        handles=[
+            CredentialHandle.user_token(
+                service="calendar",
+                user_access_token="user-calendar-token",
+                scopes=("calendar:read",),
+                principal_id="user:user-1",
+                actor_id="user-1",
+            )
+        ],
+    )
+    context = _context(
+        SCHEDULE_SUMMARY,
+        client,
+        llm_client=llm_client,
+        credentials=credentials,
+    )
+
+    result = await SCHEDULE_SUMMARY.handler(context, date="2026-07-07")
+
+    assert result == {
+        "date": "2026-07-07",
+        "timezone": "Asia/Shanghai",
+        "calendar_id": "primary",
+        "event_count": 2,
+        "summary": "今天上午有晨会，下午有评审。",
+    }
+    assert client.calls == [
+        ("get_primary_calendar", "user-calendar-token"),
+        (
+            "list_calendar_events",
+            {
+                "user_id": "me",
+                "calendar_id": "primary",
+                "start_time": datetime(2026, 7, 6, 16, 0, tzinfo=UTC),
+                "end_time": datetime(2026, 7, 7, 16, 0, tzinfo=UTC),
+                "use_user_token": "user-calendar-token",
+            },
+        ),
+    ]
+    assert len(llm_client.calls) == 1
+    assert llm_client.calls[0]["system"].startswith("你是企业内 AI 助手")
+    assert "晨会" in llm_client.calls[0]["messages"][0]["content"]
+    assert "2026-07-07" in llm_client.calls[0]["messages"][0]["content"]
+
+
 class FakeDingTalkToolClient:
     """Fake DingTalk client used by system capability tests."""
 
@@ -207,26 +288,76 @@ class FakeDingTalkToolClient:
         self.calls.append(("create_todo", kwargs))
         return DingTalkTodo(task_id="task-1", raw={"taskId": "task-1"})
 
+    async def get_primary_calendar(self, *, use_user_token: str) -> DingTalkCalendar:
+        self.calls.append(("get_primary_calendar", use_user_token))
+        return DingTalkCalendar(
+            calendar_id="primary",
+            summary="我的主日历",
+            time_zone="Asia/Shanghai",
+            raw={"calendarId": "primary", "summary": "我的主日历"},
+        )
+
+    async def list_calendar_events(self, **kwargs: Any) -> list[DingTalkCalendarEvent]:
+        self.calls.append(("list_calendar_events", kwargs))
+        return [
+            DingTalkCalendarEvent(
+                event_id="event-1",
+                summary="晨会",
+                start_time="2026-07-07T09:00:00+08:00",
+                end_time="2026-07-07T09:30:00+08:00",
+                location="会议室 A",
+                raw={"eventId": "event-1", "summary": "晨会"},
+            ),
+            DingTalkCalendarEvent(
+                event_id="event-2",
+                summary="评审",
+                start_time="2026-07-07T14:00:00+08:00",
+                end_time="2026-07-07T15:00:00+08:00",
+                raw={"eventId": "event-2", "summary": "评审"},
+            ),
+        ]
+
+
+class FakeScheduleLLM:
+    """Fake LLM service used by the schedule summary capability tests."""
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+        self.calls: list[dict[str, Any]] = []
+
+    async def complete(self, system: str, messages: list[dict[str, Any]]) -> str:
+        self.calls.append({"system": system, "messages": messages})
+        return self._reply
+
 
 def _context(
     capability: Capability,
     client: FakeDingTalkToolClient,
     *,
     document_defaults: Mapping[str, object] | None = None,
+    llm_client: object | None = None,
+    credentials: CredentialContext | None = None,
 ) -> CapabilityExecutionContext:
     services: dict[str, object] = {"dingtalk_client": client}
     if document_defaults is not None:
         services["dingtalk_document_defaults"] = dict(document_defaults)
+    if llm_client is not None:
+        services["llm_client"] = llm_client
     return CapabilityExecutionContext(
-        session=Session(
-            session_id="dingtalk:dm:conversation-1",
-            conversation_id="conversation-1",
-            kind="dm",
-            bot=BotIdentity(id="robot-code"),
-            principal=Principal(kind="user", id="user:user-1"),
-            actor=Actor(id="user-1", display_name="Alice"),
-            context={"platform": "dingtalk"},
-        ),
+        session=_session(),
         capability=capability,
         services=services,
+        credentials=credentials,
+    )
+
+
+def _session() -> Session:
+    return Session(
+        session_id="dingtalk:dm:conversation-1",
+        conversation_id="conversation-1",
+        kind="dm",
+        bot=BotIdentity(id="robot-code"),
+        principal=Principal(kind="user", id="user:user-1"),
+        actor=Actor(id="user-1", display_name="Alice"),
+        context={"platform": "dingtalk"},
     )

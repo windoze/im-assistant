@@ -19,6 +19,7 @@ from src.capabilities import (
     NeedsConsent,
     Requirement,
 )
+from src.capabilities.system.schedule_summary import CAPABILITY as SCHEDULE_SUMMARY
 from src.core import (
     Actor,
     AgentLoop,
@@ -427,6 +428,70 @@ async def test_agent_loop_suspends_and_returns_consent_link_when_authorization_i
     ]
     assert stored_messages[1].metadata["status"] == "awaiting_interaction"
     assert len(llm_client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_exposes_schedule_summary_in_dm_and_suspends_for_calendar_consent(
+    tmp_path,
+) -> None:
+    """The T25 DM-only system OBO tool should be visible and enter the consent flow."""
+
+    pending = PendingAuth(
+        nonce="nonce-schedule",
+        principal_id="user:user-1",
+        actor_id="union-1",
+        session_id="dingtalk:dm:conversation-1",
+        service="calendar",
+        scopes=("calendar:read",),
+        expires_at=datetime(2026, 1, 1, 12, 10, tzinfo=UTC),
+    )
+    llm_client = ToolCallingCompleter(
+        [
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu-schedule",
+                    "name": "schedule_summary",
+                    "input": {},
+                }
+            ]
+        ]
+    )
+    authorizer = FakeAuthorizer(
+        NeedsConsent(
+            url="https://assistant.example.com/oauth/start?nonce=nonce-schedule",
+            pending=pending,
+            reason="missing",
+        )
+    )
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=CapabilityRegistry([SCHEDULE_SUMMARY]),
+            authorizer=authorizer,
+        )
+
+        result = await agent_loop.run(session, "总结我今天的日程")
+        stored_session = await store.get_session(session.session_id)
+
+    assert result.status == "awaiting_interaction"
+    assert "nonce-schedule" in result.reply_text
+    assert llm_client.calls[0]["tools"][0]["name"] == "schedule_summary"
+    assert stored_session is not None
+    assert stored_session.context["pending_interaction"]["capability"] == "schedule_summary"
+    assert authorizer.calls == [
+        (
+            Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor"),
+            "user-1",
+            "dm",
+            "user:user-1",
+            "dingtalk:dm:conversation-1",
+        )
+    ]
 
 
 @pytest.mark.asyncio

@@ -314,10 +314,18 @@
   - Stream 启动路径已创建 `TokenVault`、`PendingAuthStore` 和 `Authorizer`,并用通讯录 `user_by_id` 将当前 actor userId 解析为 OAuth 身份核对所需的 unionId;README 已补充 Authorizer/CredentialContext 说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_authorizer.py tests/test_agent_loop.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T25 `[TODO]` OBO 工具:今日日程总结(招牌 case)
+## [DONE] T25 OBO 工具:今日日程总结(招牌 case)
 - `capabilities/system/schedule_summary.py`:`requires=[Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor")]`,`available_in=[dm]`。
 - handler:用用户 token 调 `/v1.0/calendar/users/me/...`(先 `/v1.0/calendar/primary` 取主日历,再查当天 events),拿到日程 → 交 LLM 总结 → 返回。
 - **验收**(架构 §6.4):私聊"总结我今天的日程"→ 首次弹授权 → 授权后读到**本人**日程并总结;再问无需授权(静默刷新)。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/capabilities/system/schedule_summary.py`,声明 `requires=[Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor")]` 与 `available_in=["dm"]`,工具通过 `CredentialContext` 取得 calendar 用户级 OBO token。
+  - 已修复与 T25 直接相关的可见性边界:DM-only 的 system/base 能力现在可在 DM 中暴露,带 OBO 的能力仍会在群聊中被过滤;群能力仍需 `channel_enabled` 显式启用。
+  - 已扩展 `DingTalkClient` 支持用用户 token 调 `/v1.0/calendar/primary` 获取主日历,并分页读取 `/v1.0/calendar/users/me/calendars/{calendarId}/events` 当天事件。
+  - `schedule_summary` 会按 `Asia/Shanghai` 的当天时间窗读取日程,将事件 JSON 交给注入的 `llm_client.complete(...)` 总结,并返回日期、时区、日历 ID、事件数量和总结文本。
+  - 已补充单测覆盖工具注册/OBO 元数据、DM 可见与群过滤、缺授权时进入 consent 挂起、用户 token 日历读取、事件分页解析和 handler 内部 LLM 总结;README 与架构文档已同步说明。
+  - 已验证:`.venv/bin/ruff check . --fix`、`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
+  - 当前环境缺少真实钉钉 OAuth 回调公网地址、`.env` 凭据和日历权限,未执行外部私聊首次授权/二次免授权人工验收;相关路径已由 Authorizer/TokenVault/AgentLoop/mock DingTalk calendar API 单测覆盖,具备凭据与权限后可用 `python -m src.main --stream` 复验。
 
 ## T26 `[TODO]` 【REVIEW】M4 OBO 审阅
 - 审阅 T20–T25:OAuth 流程 state/nonce 防护;**身份核对是否真能挡住冒名授权**(重点安全项);TokenVault 加密与撤销;三态逻辑;静默刷新;`me` 接口是否真按本人权限。

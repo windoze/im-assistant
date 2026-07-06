@@ -79,8 +79,9 @@ The registry loads Python modules from `src/capabilities/system/`, `src/capabili
 `src/capabilities/user/<userId>/` in that order, so later tiers override earlier capabilities with
 the same name. Visibility is filtered by `src.capabilities.can_use(...)`: capabilities requiring
 on-behalf-of user authority are hidden outside DMs, globally available capabilities are visible
-everywhere, user capabilities are visible only to their owner in DM, and group capabilities must be
-listed under `capabilities.channel_enabled.<channel_id>` in `config.yaml`.
+everywhere, DM-capable system/base capabilities are visible in DMs, user capabilities are visible
+only to their owner in DM, and group capabilities must be listed under
+`capabilities.channel_enabled.<channel_id>` in `config.yaml`.
 
 Visible executable capabilities are exposed to Claude as tools. A capability may provide
 `description` and JSON-object `input_schema` metadata; its handler is called as
@@ -89,14 +90,15 @@ Visible executable capabilities are exposed to Claude as tools. A capability may
 Handler failures are returned to Claude as error `tool_result` blocks so the agent loop can continue
 to a normal text reply.
 
-The built-in system tier now includes three application-level DingTalk tools that use the app access
-token and do not require OBO authorization:
+The built-in system tier includes application-level DingTalk tools that use the app access token and
+one DM-only calendar tool that uses OBO authorization:
 
 | Tool | Purpose | Notes |
 |---|---|---|
 | `contact_lookup` | Look up DingTalk contacts by userId or display name. | Uses the contact APIs from the OpenAPI client. |
 | `create_doc` | Create a DingTalk document and append text content. | For group use, add `create_doc` to `capabilities.channel_enabled.<openConversationId>`. Configure `dingtalk.document.parent_object_type` and `dingtalk.document.parent_object_id`, or provide those fields as tool input. |
 | `create_todo` | Create a DingTalk todo task for the current actor or a specified assignee. | Resolves userId to unionId through the contact API, then calls the todo API with the app token. |
+| `schedule_summary` | Summarize the current DM actor's DingTalk calendar for today. | Requires `calendar:read` OBO consent, reads `/v1.0/calendar/primary` and `/v1.0/calendar/users/me/calendars/<calendarId>/events` with the user token, then asks Claude to summarize the events. |
 
 Run tests:
 

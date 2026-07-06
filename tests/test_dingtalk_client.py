@@ -14,6 +14,8 @@ from src.infra.config import DingTalkConfig
 from src.infra.dingtalk_client import (
     AccessToken,
     DingTalkAPIError,
+    DingTalkCalendar,
+    DingTalkCalendarEvent,
     DingTalkClient,
     DingTalkDocument,
     DingTalkTodo,
@@ -453,6 +455,112 @@ async def test_create_todo_posts_union_id_task_and_parses_result() -> None:
 
     assert todo == DingTalkTodo(task_id="task-1", raw={"taskId": "task-1"})
     assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/todo/users/union-1/tasks"]
+
+
+@pytest.mark.asyncio
+async def test_get_primary_calendar_uses_user_token_and_parses_calendar() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        assert request.url.path == "/v1.0/calendar/primary"
+        assert request.headers["x-acs-dingtalk-access-token"] == "user-token"
+        return httpx.Response(
+            200,
+            json={
+                "result": {
+                    "calendarId": "primary",
+                    "summary": "我的主日历",
+                    "timeZone": "Asia/Shanghai",
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        calendar = await client.get_primary_calendar(use_user_token=" user-token ")
+
+    assert calendar == DingTalkCalendar(
+        calendar_id="primary",
+        summary="我的主日历",
+        time_zone="Asia/Shanghai",
+        raw={"calendarId": "primary", "summary": "我的主日历", "timeZone": "Asia/Shanghai"},
+    )
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_calendar_events_queries_range_with_user_token_and_paginates() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        assert request.url.path == "/v1.0/calendar/users/me/calendars/primary/events"
+        assert request.headers["x-acs-dingtalk-access-token"] == "user-token"
+        assert request.url.params["startTime"] == "2026-07-06T16:00:00Z"
+        assert request.url.params["endTime"] == "2026-07-07T16:00:00Z"
+        if "pageToken" not in request.url.params:
+            return httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "eventId": "event-1",
+                            "summary": "晨会",
+                            "description": "同步项目进展",
+                            "start": {"dateTime": "2026-07-07T09:00:00+08:00"},
+                            "end": {"dateTime": "2026-07-07T09:30:00+08:00"},
+                            "location": {"displayName": "会议室 A"},
+                        }
+                    ],
+                    "nextPageToken": "next-page",
+                },
+            )
+
+        assert request.url.params["pageToken"] == "next-page"
+        return httpx.Response(
+            200,
+            json={"result": {"events": [{"eventId": "event-2", "subject": "评审"}]}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        events = await client.list_calendar_events(
+            user_id="me",
+            calendar_id="primary",
+            start_time=datetime(2026, 7, 6, 16, 0, tzinfo=UTC),
+            end_time=datetime(2026, 7, 7, 16, 0, tzinfo=UTC),
+            use_user_token="user-token",
+        )
+
+    assert events == [
+        DingTalkCalendarEvent(
+            event_id="event-1",
+            summary="晨会",
+            description="同步项目进展",
+            start_time="2026-07-07T09:00:00+08:00",
+            end_time="2026-07-07T09:30:00+08:00",
+            location="会议室 A",
+            raw={
+                "eventId": "event-1",
+                "summary": "晨会",
+                "description": "同步项目进展",
+                "start": {"dateTime": "2026-07-07T09:00:00+08:00"},
+                "end": {"dateTime": "2026-07-07T09:30:00+08:00"},
+                "location": {"displayName": "会议室 A"},
+            },
+        ),
+        DingTalkCalendarEvent(
+            event_id="event-2",
+            summary="评审",
+            raw={"eventId": "event-2", "subject": "评审"},
+        ),
+    ]
+    assert len(requests) == 2
 
 
 @pytest.mark.asyncio

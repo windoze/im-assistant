@@ -118,6 +118,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         ),
                         capability_services={
                             "dingtalk_client": dingtalk_client,
+                            "llm_client": llm_client,
                             "dingtalk_document_defaults": {
                                 "parent_object_type": (
                                     app_config.dingtalk.document.parent_object_type

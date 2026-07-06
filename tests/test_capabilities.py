@@ -114,6 +114,8 @@ def test_can_use_matches_architecture_visibility_gate() -> None:
     group_cap = Capability(name="group_tool", origin="system", available_in=["group"])
     disabled_group_cap = Capability(name="disabled_group", origin="system", available_in=["group"])
     dm_system_cap = Capability(name="dm_system", origin="system", available_in=["dm"])
+    dm_base_cap = Capability(name="dm_base", origin="base", available_in=["dm"])
+    dm_named_group_cap = Capability(name="group_tool", origin="system", available_in=["dm"])
 
     assert can_use(global_cap, "dm", actor, None) is True
     assert can_use(global_cap, "group", actor, channel) is True
@@ -123,7 +125,9 @@ def test_can_use_matches_architecture_visibility_gate() -> None:
     assert can_use(other_private_cap, "dm", actor, None) is False
     assert can_use(group_cap, "group", actor, channel) is True
     assert can_use(disabled_group_cap, "group", actor, channel) is False
-    assert can_use(dm_system_cap, "dm", actor, None) is False
+    assert can_use(dm_system_cap, "dm", actor, None) is True
+    assert can_use(dm_base_cap, "dm", actor, None) is True
+    assert can_use(dm_named_group_cap, "group", actor, channel) is False
 
 
 def test_three_tier_loader_overlays_user_base_and_system_capabilities(tmp_path) -> None:

@@ -98,9 +98,11 @@ def can_use(
         return False
     if "global" in capability.available_in:
         return True
-    if mode == "dm" and capability.origin == "user":
-        return capability.owner_id == actor_id
-    if mode == "group" and channel is not None:
+    if mode == "dm" and "dm" in capability.available_in:
+        if capability.origin == "user":
+            return capability.owner_id == actor_id
+        return capability.origin in ("system", "base")
+    if mode == "group" and "group" in capability.available_in and channel is not None:
         return capability.name in channel.enabled_capabilities
     return False
 

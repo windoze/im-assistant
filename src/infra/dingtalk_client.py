@@ -27,6 +27,8 @@ CONTACT_USER_BY_ID_PATH_TEMPLATE = "/v1.0/contact/users/{user_id}"
 DOCUMENT_CREATE_PATH = "/v1.0/documents"
 DOCUMENT_CONTENT_BLOCKS_PATH_TEMPLATE = "/v1.0/documents/{doc_id}/contentBlocks"
 TODO_CREATE_PATH_TEMPLATE = "/v1.0/todo/users/{union_id}/tasks"
+CALENDAR_PRIMARY_PATH = "/v1.0/calendar/primary"
+CALENDAR_EVENTS_PATH_TEMPLATE = "/v1.0/calendar/users/{user_id}/calendars/{calendar_id}/events"
 TOKEN_HEADER = "x-acs-dingtalk-access-token"
 TOKEN_REFRESH_SKEW_SECONDS = 300
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -68,6 +70,29 @@ class DingTalkTodo:
 
     task_id: str
     raw: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DingTalkCalendar:
+    """Normalized DingTalk calendar metadata."""
+
+    calendar_id: str
+    raw: Mapping[str, Any]
+    summary: str | None = None
+    time_zone: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DingTalkCalendarEvent:
+    """Normalized DingTalk calendar event details."""
+
+    event_id: str | None
+    raw: Mapping[str, Any]
+    summary: str | None = None
+    description: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    location: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +386,56 @@ class DingTalkClient:
 
         payload = await self.api_post(path, request_body)
         return _parse_todo(payload, method="POST", path=path)
+
+    async def get_primary_calendar(self, *, use_user_token: str) -> DingTalkCalendar:
+        """Fetch the primary calendar visible to one DingTalk user token."""
+
+        payload = await self.api_get(
+            CALENDAR_PRIMARY_PATH,
+            use_user_token=_non_empty_string(use_user_token, "use_user_token"),
+        )
+        return _parse_calendar(payload, method="GET", path=CALENDAR_PRIMARY_PATH)
+
+    async def list_calendar_events(
+        self,
+        *,
+        user_id: str,
+        calendar_id: str,
+        start_time: datetime | str,
+        end_time: datetime | str,
+        use_user_token: str,
+        page_size: int | None = None,
+    ) -> list[DingTalkCalendarEvent]:
+        """List DingTalk calendar events in a time range with a user-level token."""
+
+        normalized_user_id = _non_empty_string(user_id, "user_id")
+        normalized_calendar_id = _non_empty_string(calendar_id, "calendar_id")
+        path = CALENDAR_EVENTS_PATH_TEMPLATE.format(
+            user_id=_quote_path_segment(normalized_user_id),
+            calendar_id=_quote_path_segment(normalized_calendar_id),
+        )
+        base_params: dict[str, str | int] = {
+            "startTime": _calendar_query_time(start_time, "start_time"),
+            "endTime": _calendar_query_time(end_time, "end_time"),
+        }
+        if page_size is not None:
+            base_params["maxResults"] = _positive_int(page_size, "page_size")
+
+        events: list[DingTalkCalendarEvent] = []
+        page_token: str | None = None
+        while True:
+            params = dict(base_params)
+            if page_token is not None:
+                params["pageToken"] = page_token
+            payload = await self.api_get(
+                path,
+                params=params,
+                use_user_token=_non_empty_string(use_user_token, "use_user_token"),
+            )
+            events.extend(_extract_calendar_events(payload, method="GET", path=path))
+            page_token = _extract_next_page_token(payload, method="GET", path=path)
+            if page_token is None:
+                return events
 
     def _is_cached_token_fresh(self) -> bool:
         return self._clock() < self._refresh_after
@@ -668,6 +743,12 @@ def _to_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _calendar_query_time(value: datetime | str, field_name: str) -> str:
+    if isinstance(value, datetime):
+        return _to_utc(value).isoformat().replace("+00:00", "Z")
+    return _non_empty_string(value, field_name)
+
+
 def _detail_url_mapping(value: Mapping[str, str]) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError("detail_url must be a mapping")
@@ -753,6 +834,80 @@ def _parse_todo(payload: Any, *, method: str, path: str) -> DingTalkTodo:
             errmsg="todo response must include taskId or todoId",
         )
     return DingTalkTodo(task_id=task_id, raw=dict(result_object))
+
+
+def _parse_calendar(payload: Any, *, method: str, path: str) -> DingTalkCalendar:
+    payload_object = _response_object(payload, method=method, path=path)
+    result_object = _nested_result_object(payload_object)
+    calendar_id = _string_field(result_object, "calendarId", "id")
+    if calendar_id is None:
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="calendar response must include calendarId",
+        )
+    return DingTalkCalendar(
+        calendar_id=calendar_id,
+        summary=_string_field(result_object, "summary", "name"),
+        time_zone=_string_field(result_object, "timeZone", "timezone"),
+        raw=dict(result_object),
+    )
+
+
+def _extract_calendar_events(
+    payload: Any, *, method: str, path: str
+) -> list[DingTalkCalendarEvent]:
+    payload_object = _response_object(payload, method=method, path=path)
+    raw_events = _first_present(payload_object, "events", "items", "list")
+    result = payload_object.get("result")
+    if raw_events is None and isinstance(result, Mapping):
+        raw_events = _first_present(result, "events", "items", "list")
+    if raw_events is None and isinstance(result, list):
+        raw_events = result
+
+    if not isinstance(raw_events, list):
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="calendar events response must include an events list",
+        )
+
+    return [_parse_calendar_event(raw_event, method=method, path=path) for raw_event in raw_events]
+
+
+def _parse_calendar_event(payload: Any, *, method: str, path: str) -> DingTalkCalendarEvent:
+    event_object = _response_object(payload, method=method, path=path)
+    return DingTalkCalendarEvent(
+        event_id=_string_field(event_object, "eventId", "event_id", "id"),
+        summary=_string_field(event_object, "summary", "title", "subject"),
+        description=_string_field(event_object, "description", "body"),
+        start_time=_calendar_event_time(event_object.get("start")),
+        end_time=_calendar_event_time(event_object.get("end")),
+        location=_calendar_event_location(event_object.get("location")),
+        raw=dict(event_object),
+    )
+
+
+def _calendar_event_time(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, Mapping):
+        return _string_field(value, "dateTime", "datetime", "date", "time")
+    return None
+
+
+def _calendar_event_location(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, Mapping):
+        return _string_field(value, "displayName", "name", "address")
+    return None
 
 
 def _nested_result_object(payload: Mapping[str, Any]) -> Mapping[str, Any]:

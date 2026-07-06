@@ -29,6 +29,12 @@ class DingTalkAppClient(Protocol):
     async def create_todo(self, **kwargs: Any) -> Any:
         """Create one DingTalk todo task."""
 
+    async def get_primary_calendar(self, *, use_user_token: str) -> Any:
+        """Return the current user's primary DingTalk calendar."""
+
+    async def list_calendar_events(self, **kwargs: Any) -> list[Any]:
+        """Return DingTalk calendar events for a user and calendar."""
+
 
 def require_dingtalk_client(context: Any, *method_names: str) -> DingTalkAppClient:
     """Return the configured DingTalk client and verify required methods are present."""
