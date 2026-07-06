@@ -10,6 +10,7 @@ import pytest
 
 from src.infra.store import (
     IdentityBindingRecord,
+    PendingInteractionRecord,
     SessionRecord,
     SQLiteStore,
     TokenVaultRecord,
@@ -35,6 +36,7 @@ async def test_initialize_creates_required_tables_idempotently(tmp_path) -> None
     assert {
         "sessions",
         "messages",
+        "pending_interactions",
         "identity_bindings",
         "audit_log",
         "token_vault",
@@ -97,6 +99,30 @@ async def test_store_supports_basic_crud_for_all_t10_tables(tmp_path) -> None:
             user_message,
             assistant_message,
         ]
+
+        pending = await store.create_pending_interaction(
+            PendingInteractionRecord(
+                correlation_id="confirm-1",
+                session_id="session-1",
+                kind="confirm",
+                responder_id="actor-2",
+                expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+                payload={"action": "approve"},
+            )
+        )
+        assert pending.status == "pending"
+        assert await store.get_pending_interaction("confirm-1") == pending
+        assert await store.get_pending_interaction_for_session("session-1") == pending
+        resolved_pending = await store.resolve_pending_interaction(
+            "confirm-1",
+            status="resolved",
+            resolution={"approved": True},
+            resolved_at=datetime(2030, 1, 1, 0, 1, tzinfo=UTC),
+        )
+        assert resolved_pending.status == "resolved"
+        assert resolved_pending.resolution == {"approved": True}
+        assert resolved_pending.resolved_at == datetime(2030, 1, 1, 0, 1, tzinfo=UTC)
+        assert await store.get_pending_interaction_for_session("session-1") is None
 
         binding = await store.upsert_identity_binding(
             IdentityBindingRecord(

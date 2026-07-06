@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 SessionKind = Literal["dm", "group"]
 MessageRole = Literal["system", "user", "assistant", "tool"]
+PendingInteractionStatus = Literal["pending", "resolved", "cancelled"]
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -51,6 +52,25 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_id_message_id
     ON messages(session_id, message_id);
+
+CREATE TABLE IF NOT EXISTS pending_interactions (
+    correlation_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('confirm', 'consent')),
+    responder_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL CHECK (status IN ('pending', 'resolved', 'cancelled')),
+    resolution_json TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_interactions_session_status
+    ON pending_interactions(session_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_pending_interactions_expires_at
+    ON pending_interactions(expires_at);
 
 CREATE TABLE IF NOT EXISTS identity_bindings (
     provider TEXT NOT NULL,
@@ -136,6 +156,22 @@ class MessageRecord:
     provider_message_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingInteractionRecord:
+    """Persisted out-of-band interaction waiting for a specific actor response."""
+
+    correlation_id: str
+    session_id: str
+    kind: str
+    responder_id: str
+    expires_at: datetime
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    status: PendingInteractionStatus = "pending"
+    resolution: Mapping[str, Any] | None = None
+    created_at: datetime | None = None
+    resolved_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +451,115 @@ class SQLiteStore:
         await db.commit()
         return cursor.rowcount
 
+    async def create_pending_interaction(
+        self,
+        record: PendingInteractionRecord,
+    ) -> PendingInteractionRecord:
+        """Persist one pending interaction that can survive process restart."""
+
+        created_at = _format_datetime(record.created_at or _utc_now())
+        db = await self._connection()
+        await db.execute(
+            """
+            INSERT INTO pending_interactions (
+                correlation_id,
+                session_id,
+                kind,
+                responder_id,
+                payload_json,
+                status,
+                resolution_json,
+                expires_at,
+                created_at,
+                resolved_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _non_empty_string(record.correlation_id, "correlation_id"),
+                _non_empty_string(record.session_id, "session_id"),
+                _pending_interaction_kind(record.kind),
+                _non_empty_string(record.responder_id, "responder_id"),
+                _encode_json_object(record.payload),
+                _pending_interaction_status(record.status),
+                None if record.resolution is None else _encode_json_object(record.resolution),
+                _format_datetime(record.expires_at),
+                created_at,
+                None if record.resolved_at is None else _format_datetime(record.resolved_at),
+            ),
+        )
+        await db.commit()
+        stored = await self.get_pending_interaction(record.correlation_id)
+        if stored is None:
+            raise StoreError(f"Pending interaction was not stored: {record.correlation_id}")
+        return stored
+
+    async def get_pending_interaction(
+        self,
+        correlation_id: str,
+    ) -> PendingInteractionRecord | None:
+        """Return one pending-interaction row by correlation id."""
+
+        row = await self._fetchone(
+            "SELECT * FROM pending_interactions WHERE correlation_id = ?",
+            (_non_empty_string(correlation_id, "correlation_id"),),
+        )
+        return None if row is None else _row_to_pending_interaction(row)
+
+    async def get_pending_interaction_for_session(
+        self,
+        session_id: str,
+    ) -> PendingInteractionRecord | None:
+        """Return the active pending interaction for one Session, if any."""
+
+        row = await self._fetchone(
+            """
+            SELECT *
+            FROM pending_interactions
+            WHERE session_id = ? AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (_non_empty_string(session_id, "session_id"),),
+        )
+        return None if row is None else _row_to_pending_interaction(row)
+
+    async def resolve_pending_interaction(
+        self,
+        correlation_id: str,
+        *,
+        status: PendingInteractionStatus,
+        resolution: Mapping[str, Any],
+        resolved_at: datetime | None = None,
+    ) -> PendingInteractionRecord:
+        """Mark one pending interaction as resolved or cancelled exactly once."""
+
+        normalized_status = _pending_interaction_terminal_status(status)
+        timestamp = _format_datetime(resolved_at or _utc_now())
+        db = await self._connection()
+        cursor = await db.execute(
+            """
+            UPDATE pending_interactions
+            SET status = ?,
+                resolution_json = ?,
+                resolved_at = ?
+            WHERE correlation_id = ? AND status = 'pending'
+            """,
+            (
+                normalized_status,
+                _encode_json_object(resolution),
+                timestamp,
+                _non_empty_string(correlation_id, "correlation_id"),
+            ),
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            raise StoreError(f"Pending interaction is not active: {correlation_id}")
+        stored = await self.get_pending_interaction(correlation_id)
+        if stored is None:
+            raise StoreError(f"Pending interaction disappeared: {correlation_id}")
+        return stored
+
     async def upsert_identity_binding(
         self,
         record: IdentityBindingRecord,
@@ -692,6 +837,23 @@ def _row_to_message(row: aiosqlite.Row) -> MessageRecord:
     )
 
 
+def _row_to_pending_interaction(row: aiosqlite.Row) -> PendingInteractionRecord:
+    return PendingInteractionRecord(
+        correlation_id=row["correlation_id"],
+        session_id=row["session_id"],
+        kind=row["kind"],
+        responder_id=row["responder_id"],
+        payload=_decode_json_object(row["payload_json"]),
+        status=row["status"],
+        resolution=(
+            None if row["resolution_json"] is None else _decode_json_object(row["resolution_json"])
+        ),
+        expires_at=_parse_datetime(row["expires_at"]),
+        created_at=_parse_datetime(row["created_at"]),
+        resolved_at=None if row["resolved_at"] is None else _parse_datetime(row["resolved_at"]),
+    )
+
+
 def _row_to_identity_binding(row: aiosqlite.Row) -> IdentityBindingRecord:
     return IdentityBindingRecord(
         provider=row["provider"],
@@ -757,6 +919,31 @@ def _decode_json_string_array(value: str) -> list[str]:
 
 def _normalize_scopes(scopes: Sequence[str]) -> list[str]:
     return [_non_empty_string(scope, "scope") for scope in scopes]
+
+
+def _pending_interaction_kind(kind: str) -> str:
+    normalized = _non_empty_string(kind, "kind")
+    if normalized not in ("confirm", "consent"):
+        raise ValueError("`kind` must be 'confirm' or 'consent'")
+    return normalized
+
+
+def _pending_interaction_status(status: str) -> PendingInteractionStatus:
+    normalized = _non_empty_string(status, "status")
+    if normalized == "pending":
+        return "pending"
+    if normalized == "resolved":
+        return "resolved"
+    if normalized == "cancelled":
+        return "cancelled"
+    raise ValueError("`status` must be 'pending', 'resolved', or 'cancelled'")
+
+
+def _pending_interaction_terminal_status(status: str) -> PendingInteractionStatus:
+    normalized = _pending_interaction_status(status)
+    if normalized == "pending":
+        raise ValueError("`status` must be a terminal pending-interaction status")
+    return normalized
 
 
 def _non_empty_string(value: str, field_name: str) -> str:

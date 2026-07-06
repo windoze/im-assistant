@@ -1,26 +1,45 @@
 # Execution Plan
 
-I will follow `TODO.md` as the source of truth and complete only the first task whose heading is not prefixed with `[DONE]`.
+I will not record private chain-of-thought, but I will keep this file updated with the actionable plan and progress.
 
-1. Read `TODO.md` to identify the first incomplete task and its stated validation requirements.
-2. Review only the files and context needed for that task, including the latest commit if it directly mentions unfinished work relevant to the selected task.
-3. Implement the task as specified, adding any prerequisite task to `TODO.md` only if a concrete blocker makes direct completion impossible.
-4. Run formatting, linting, and relevant tests according to the project’s existing tooling and the task’s validation requirements.
-5. Update this progress file at key milestones.
-6. Mark the completed task in `TODO.md` with a `[DONE]` prefix and update its completion record.
-7. Commit all changes for this invocation with a descriptive message, then stop without starting the next task.
+1. Read TODO.md first and identify the first task whose heading is not prefixed with [DONE].
+2. Inspect only the files needed to understand that task, plus recent git context if it directly mentions an unfinished issue relevant to the selected task.
+3. Implement the selected task completely, adding a prerequisite task to TODO.md only if a concrete blocker makes correct execution impossible.
+4. Run formatting, linting, and the relevant/full tests required by TODO.md and the repository workflow.
+5. Update TODO.md by prefixing the completed task heading with [DONE] and filling its completion record; update PLAN.md only if phase-level sequencing changes.
+6. Commit all changes related to this invocation with a descriptive message and the required co-author trailer, then stop without starting the next task.
 
-## Progress
+## Current Task
 
-- 2026-07-07 invocation started. I will re-read `TODO.md` as the authoritative task source, identify the first heading not prefixed with `[DONE]`, and then either complete exactly that task or add/commit the minimum prerequisite if a concrete blocker prevents completion.
-- Selected task: T26 `【REVIEW】M4 OBO 审阅`. I will review the T20-T25 OBO implementation, fix any concrete defects found, run the required formatter/linter/tests, mark T26 `[DONE]`, and commit only this invocation's changes.
-- T26 review finding: refresh-token rejection classification treated any 400/401/403 OAuth refresh error as a revoked user grant. I narrowed rejection detection to explicit refresh-token/invalid-grant signals and added DingTalk client plus TokenVault regressions so unrelated refresh failures keep stored OBO grants.
-- Validation passed and T26 is marked `[DONE]` in `TODO.md`; next step is final status inspection and commit.
-- Selected task: T25 `OBO 工具:今日日程总结(招牌 case)`.
-- Latest commit checked: no unfinished issue relevant to T25 was indicated.
-- Next: inspect existing capability, credential, DingTalk client, and LLM patterns; then add the schedule-summary capability, tests, docs, TODO completion record, and commit.
-- Relevant prerequisite identified: the existing visibility gate hides system capabilities declared as `available_in=["dm"]`, while T25 and architecture §6.4 require `schedule_summary` to be visible in DM and hidden in group. I will fix the gate generally so DM-capable system/base tools are visible in DM and group-only tools still require channel enablement.
-- Implemented: corrected visibility semantics, added DingTalk primary-calendar/event-list wrappers, added `schedule_summary` with `calendar:read` OBO requirement and LLM summarization, wired `llm_client` into capability services, and added focused regression tests/docs.
-- Validation completed successfully: formatter, lint, test suite, and `python -m src.main`.
-- T25 has been marked `[DONE]` in `TODO.md` with a completion record.
-- Next: inspect final git status and commit all changes for this invocation.
+Selected first incomplete TODO: T27 SessionInterrupt 原语与 AwaitingInteraction.
+
+Task requirements:
+- Add `core/interrupt.py` with `SessionInterrupt` (`kind`, `payload`, `correlation_id`, `responder`, `expires_at`, `resolve`) and a pending store that can persist pending interaction state.
+- Extend the session state flow so an agent can move `RunningAgent -> AwaitingInteraction -> resume`.
+- Validate creation, suspension, resolution, and restoration behavior with tests.
+
+Execution steps:
+1. Inspect existing session, agent loop, store, and tests around `AwaitingInteraction` and pending consent.
+2. Implement interrupt primitives and persistence using existing SQLite/session patterns.
+3. Wire agent loop suspension/resume to use the new primitive without changing M5 confirm-card behavior prematurely.
+4. Add targeted tests for interrupt creation, persisted pending state, resolve, resume, expiry/responder boundaries, plus existing consent flow compatibility.
+5. Run formatting, linting, and tests, then mark T27 done and commit.
+
+## Progress Update
+
+Implemented the T27 core shape:
+- Added a persistent `pending_interactions` SQLite table and CRUD methods.
+- Added `src/core/interrupt.py` with `SessionInterrupt`, resolution types, and `SessionInterruptManager`.
+- Wired `AgentLoop` consent suspension through the new interrupt manager and added `resume_interaction(...)`.
+- Added tests for interrupt persistence/resolution and updated store/agent-loop tests.
+
+Next: run formatting/linting/tests, fix any failures, then update TODO.md and commit.
+
+## Completion Update
+
+T27 is implemented and documented:
+- TODO.md now marks T27 `[DONE]` with validation notes.
+- README documents persisted pending interactions and `AgentLoop.resume_interaction(...)`.
+- Formatting, linting, focused tests, and the full pytest suite passed after code changes.
+
+Next: inspect git diff and commit all task-related changes.

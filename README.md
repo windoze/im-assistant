@@ -45,11 +45,12 @@ DingTalk OpenAPI. The first group @mention activates that group Session and send
 before normal handling continues. Non-text messages receive `暂只支持文本`. Inbound Stream events are
 queued by Session, so messages in the same DingTalk conversation are processed strictly in order
 while different conversations can continue in parallel; each agent turn persists
-`Idle → RunningAgent → Idle` state transitions.
+`Idle → RunningAgent → Idle` state transitions, or `RunningAgent → AwaitingInteraction` when an
+out-of-band consent/confirm interrupt suspends the turn.
 
 On Stream startup the service idempotently initializes the SQLite database configured by
 `storage.database_path` with tables for sessions, message history, identity bindings, audit logs,
-and encrypted token material.
+pending interactions, and encrypted token material.
 
 `src.infra.token_vault.TokenVault` stores DingTalk user-level OBO access and refresh tokens in the
 `token_vault` table encrypted with the `.env` Fernet key, and marks grants that are expired or within
@@ -73,6 +74,12 @@ returns `Granted` with a user credential when a usable token exists, returns `Ne
 pending `/oauth/start?nonce=...` link when consent is missing, and returns `Denied` for OBO tools
 outside DMs. When an agent tool call needs consent, the Session is persisted as `AwaitingInteraction`
 and the bot replies with the authorization link.
+
+`src.core.interrupt.SessionInterruptManager` persists out-of-band `consent` and `confirm`
+interactions in `pending_interactions` with a `correlation_id`, expected responder, payload, and
+expiry. Resolving an interrupt validates the responder, marks the pending row resolved, clears the
+Session's `pending_interaction` context, and restores the Session to `Idle`; `AgentLoop` exposes this
+through `resume_interaction(...)` for OAuth/callback routing.
 
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and

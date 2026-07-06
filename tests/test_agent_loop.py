@@ -405,6 +405,7 @@ async def test_agent_loop_suspends_and_returns_consent_link_when_authorization_i
             provider_message_id="msg-consent",
         )
         stored_session = await store.get_session(session.session_id)
+        stored_pending = await store.get_pending_interaction("nonce-1")
         stored_messages = await store.list_messages(session.session_id)
 
     assert result.status == "awaiting_interaction"
@@ -415,13 +416,21 @@ async def test_agent_loop_suspends_and_returns_consent_link_when_authorization_i
         "kind": "consent",
         "correlation_id": "nonce-1",
         "responder": "user-1",
-        "capability": "read_calendar",
-        "tool_use_id": "toolu-calendar",
-        "service": "calendar",
-        "scopes": ["calendar:read"],
-        "url": "https://assistant.example.com/oauth/start?nonce=nonce-1",
-        "reason": "missing",
+        "expires_at": "2026-01-01T12:10:00+00:00",
+        "payload": {
+            "capability": "read_calendar",
+            "tool_use_id": "toolu-calendar",
+            "service": "calendar",
+            "scopes": ["calendar:read"],
+            "url": "https://assistant.example.com/oauth/start?nonce=nonce-1",
+            "reason": "missing",
+        },
     }
+    assert stored_pending is not None
+    assert stored_pending.kind == "consent"
+    assert stored_pending.session_id == session.session_id
+    assert stored_pending.responder_id == "user-1"
+    assert stored_pending.payload == stored_session.context["pending_interaction"]["payload"]
     assert [(message.role, message.content) for message in stored_messages] == [
         ("user", "read my calendar"),
         ("assistant", result.reply_text),
@@ -482,7 +491,9 @@ async def test_agent_loop_exposes_schedule_summary_in_dm_and_suspends_for_calend
     assert "nonce-schedule" in result.reply_text
     assert llm_client.calls[0]["tools"][0]["name"] == "schedule_summary"
     assert stored_session is not None
-    assert stored_session.context["pending_interaction"]["capability"] == "schedule_summary"
+    assert stored_session.context["pending_interaction"]["payload"]["capability"] == (
+        "schedule_summary"
+    )
     assert authorizer.calls == [
         (
             Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor"),
@@ -608,22 +619,88 @@ async def test_agent_loop_sets_running_state_while_completion_is_pending(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_rejects_awaiting_interaction_until_resume_is_implemented(
-    tmp_path,
-) -> None:
-    """AwaitingInteraction is reserved for the later suspend/resume task."""
+async def test_agent_loop_resumes_pending_consent_interaction(tmp_path) -> None:
+    """Resolving the consent interrupt should restore the Session to Idle."""
+
+    pending = PendingAuth(
+        nonce="nonce-resume",
+        principal_id="user:user-1",
+        actor_id="union-1",
+        session_id="dingtalk:dm:conversation-1",
+        service="calendar",
+        scopes=("calendar:read",),
+        expires_at=datetime(2030, 1, 1, 12, 10, tzinfo=UTC),
+    )
+    registry = CapabilityRegistry(
+        [
+            Capability(
+                name="read_calendar",
+                origin="system",
+                available_in=["global"],
+                requires=[
+                    Requirement(service="calendar", scopes=["calendar:read"], on_behalf_of="actor")
+                ],
+                handler=lambda _context: "must not run before consent",
+            )
+        ]
+    )
+    llm_client = ToolCallingCompleter(
+        [[{"type": "tool_use", "id": "toolu-resume", "name": "read_calendar", "input": {}}]]
+    )
+    authorizer = FakeAuthorizer(
+        NeedsConsent(
+            url="https://assistant.example.com/oauth/start?nonce=nonce-resume",
+            pending=pending,
+            reason="missing",
+        )
+    )
 
     async with SQLiteStore(tmp_path / "assistant.db") as store:
-        session = await _stored_session(store, state="AwaitingInteraction")
-        agent_loop = AgentLoop(store, FakeCompleter("unused"), system_prompt="system prompt")
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+            authorizer=authorizer,
+        )
+        await agent_loop.run(session, "read my calendar")
 
         with pytest.raises(AgentLoopStateError, match="AwaitingInteraction"):
-            await agent_loop.run(session, "hello")
+            awaiting_record = await store.get_session(session.session_id)
+            assert awaiting_record is not None
+            await agent_loop.run(
+                Session(
+                    session_id=awaiting_record.session_id,
+                    conversation_id=awaiting_record.conversation_id,
+                    kind=awaiting_record.kind,
+                    bot=session.bot,
+                    principal=session.principal,
+                    actor=session.actor,
+                    context=awaiting_record.context,
+                    state=awaiting_record.state,
+                    lifecycle=awaiting_record.lifecycle,
+                    created_at=awaiting_record.created_at,
+                    updated_at=awaiting_record.updated_at,
+                ),
+                "hello before resume",
+            )
 
-        stored_session = await store.get_session(session.session_id)
+        resolution = await agent_loop.resume_interaction(
+            "nonce-resume",
+            {"authorized": True},
+            responder="user-1",
+        )
+        resolved_pending = await store.get_pending_interaction("nonce-resume")
+        restored_session = await store.get_session(session.session_id)
 
-    assert stored_session is not None
-    assert stored_session.state == "AwaitingInteraction"
+    assert resolution.status == "resolved"
+    assert resolution.payload == {"authorized": True}
+    assert resolved_pending is not None
+    assert resolved_pending.status == "resolved"
+    assert restored_session is not None
+    assert restored_session.state == "Idle"
+    assert "pending_interaction" not in restored_session.context
 
 
 async def _stored_session(store: SQLiteStore, *, state: str = "Idle") -> Session:

@@ -6,6 +6,7 @@ import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
@@ -21,9 +22,16 @@ from src.capabilities import (
     Requirement,
     can_use,
 )
+from src.core.interrupt import InterruptResolution, SessionInterruptManager
 from src.core.session import Session, SessionState
 from src.infra.log import get_logger
-from src.infra.store import MessageRecord, MessageRole, SessionRecord
+from src.infra.store import (
+    MessageRecord,
+    MessageRole,
+    PendingInteractionRecord,
+    PendingInteractionStatus,
+    SessionRecord,
+)
 
 logger = get_logger(__name__)
 
@@ -160,6 +168,37 @@ class AgentLoopStore(Protocol):
     async def upsert_session(self, record: SessionRecord) -> SessionRecord:
         """Persist Session state changes."""
 
+    async def create_pending_interaction(
+        self,
+        record: PendingInteractionRecord,
+    ) -> PendingInteractionRecord:
+        """Persist one pending Session interaction."""
+
+    async def get_pending_interaction(
+        self,
+        correlation_id: str,
+    ) -> PendingInteractionRecord | None:
+        """Return one pending Session interaction."""
+
+    async def get_pending_interaction_for_session(
+        self,
+        session_id: str,
+    ) -> PendingInteractionRecord | None:
+        """Return the active pending Session interaction."""
+
+    async def resolve_pending_interaction(
+        self,
+        correlation_id: str,
+        *,
+        status: PendingInteractionStatus,
+        resolution: Mapping[str, Any],
+        resolved_at: datetime | None = None,
+    ) -> PendingInteractionRecord:
+        """Persist a pending-interaction resolution."""
+
+    async def get_session(self, session_id: str) -> SessionRecord | None:
+        """Return one persisted Session."""
+
 
 class ToolExecutor(Protocol):
     """Extension point for M3 Claude tool-use execution."""
@@ -205,6 +244,7 @@ class AgentLoop:
         channel_enabled_capabilities: Mapping[str, Sequence[str]] | None = None,
         capability_services: Mapping[str, object] | None = None,
         authorizer: CapabilityAuthorizer | None = None,
+        interrupt_manager: SessionInterruptManager | None = None,
         max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
     ) -> None:
         if capability_registry is not None and capability_registry_factory is not None:
@@ -223,6 +263,7 @@ class AgentLoop:
         )
         self._capability_services = MappingProxyType(dict(capability_services or {}))
         self._authorizer = authorizer
+        self._interrupt_manager = interrupt_manager or SessionInterruptManager(store)
         self._max_tool_iterations = _positive_int(max_tool_iterations, "max_tool_iterations")
 
     async def run(
@@ -268,6 +309,15 @@ class AgentLoop:
                     reply_text = await self._llm_client.complete(self._system_prompt, llm_messages)
             except AgentLoopConsentRequired as exc:
                 reply_text = _consent_reply_text(exc.consent)
+                interrupt = await self._interrupt_manager.create(
+                    session,
+                    kind="consent",
+                    correlation_id=exc.consent.pending.nonce,
+                    responder=session.actor.id,
+                    expires_at=exc.consent.pending.expires_at,
+                    payload=_consent_interrupt_payload(exc),
+                )
+                suspended = True
                 await self._persist_suspended_turn(
                     session,
                     user_text=normalized_text,
@@ -277,13 +327,8 @@ class AgentLoop:
                     consent=exc.consent,
                     capability=exc.capability,
                     tool_use=exc.tool_use,
+                    interrupt_expires_at=interrupt.expires_at.isoformat(),
                 )
-                await self._set_session_state(
-                    session,
-                    "AwaitingInteraction",
-                    context=_context_with_pending_consent(session, exc),
-                )
-                suspended = True
                 logger.info(
                     "agent_loop_awaiting_consent",
                     extra={
@@ -309,6 +354,21 @@ class AgentLoop:
         finally:
             if not suspended:
                 await self._set_session_state(session, "Idle")
+
+    async def resume_interaction(
+        self,
+        correlation_id: str,
+        reply: Mapping[str, Any] | None = None,
+        *,
+        responder: str,
+    ) -> InterruptResolution:
+        """Resolve a pending Session interaction and restore its Session to Idle."""
+
+        return await self._interrupt_manager.resolve(
+            correlation_id,
+            reply,
+            responder=responder,
+        )
 
     async def _persist_completed_turn(
         self,
@@ -346,6 +406,7 @@ class AgentLoop:
         consent: NeedsConsent,
         capability: Capability,
         tool_use: ToolUseRequest,
+        interrupt_expires_at: str,
     ) -> None:
         await self._store.add_message(
             session_id=session.session_id,
@@ -368,6 +429,7 @@ class AgentLoop:
                 "service": consent.pending.service,
                 "scopes": list(consent.pending.scopes),
                 "pending_nonce": consent.pending.nonce,
+                "expires_at": interrupt_expires_at,
                 "reason": consent.reason,
             },
         )
@@ -547,7 +609,7 @@ def _ensure_idle(session: Session) -> None:
     if session.state == "Idle":
         return
     if session.state == "AwaitingInteraction":
-        raise AgentLoopStateError("Session resume from AwaitingInteraction is reserved for M5")
+        raise AgentLoopStateError("Session must resolve AwaitingInteraction before agent loop")
     raise AgentLoopStateError(f"Session cannot enter agent loop from state: {session.state}")
 
 
@@ -661,15 +723,8 @@ def _consent_reply_text(consent: NeedsConsent) -> str:
     )
 
 
-def _context_with_pending_consent(
-    session: Session,
-    exc: AgentLoopConsentRequired,
-) -> dict[str, Any]:
-    context = dict(session.context)
-    context["pending_interaction"] = {
-        "kind": "consent",
-        "correlation_id": exc.consent.pending.nonce,
-        "responder": session.actor.id,
+def _consent_interrupt_payload(exc: AgentLoopConsentRequired) -> dict[str, Any]:
+    return {
         "capability": exc.capability.name,
         "tool_use_id": exc.tool_use.id,
         "service": exc.consent.pending.service,
@@ -677,7 +732,6 @@ def _context_with_pending_consent(
         "url": exc.consent.url,
         "reason": exc.consent.reason,
     }
-    return context
 
 
 def _plain_json_object(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:

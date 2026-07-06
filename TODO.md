@@ -342,10 +342,16 @@
 
 # M5 — 带外交互(confirm / consent / 通告)
 
-## T27 `[TODO]` SessionInterrupt 原语与 AwaitingInteraction
+## [DONE] T27 SessionInterrupt 原语与 AwaitingInteraction
 - `core/interrupt.py`:`SessionInterrupt`(架构 §8.4b:`kind(confirm|consent)`、`payload`、`correlation_id`、`responder`、`expires_at`、`resolve`);pending 表(可落盘,架构 §8.1)。
 - Session 状态机加 `RunningAgent→AwaitingInteraction→resume`。
 - **验收**:能创建一个 interrupt 并挂起会话;resolve 后恢复。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/core/interrupt.py`,实现 `SessionInterrupt`、`InterruptResolution`、responder/expiry 校验和 `SessionInterruptManager`,统一承载 `confirm` / `consent` 带外交互。
+  - 已在 SQLite schema 增加 `pending_interactions` 表及 CRUD,按 `correlation_id`、`session_id`、`kind`、`responder_id`、payload、过期时间和 resolution 持久化 pending 交互,可在进程重启后恢复。
+  - 已将 AgentLoop 的 OBO `NeedsConsent` 挂起路径归并到 `SessionInterruptManager`:创建 consent interrupt 后持久化 `AwaitingInteraction`,并新增 `resume_interaction(...)` 在 resolve 后清理 `pending_interaction` 上下文并恢复 `Idle`。
+  - 已补充单测覆盖 interrupt 创建/落盘/重开恢复、responder 不匹配拒绝、resolve 恢复 Idle、过期回复拒绝、AgentLoop consent pending 持久化和 resume 路径;README 已更新运行时说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_interrupt.py tests/test_store.py tests/test_agent_loop.py -q`、`.venv/bin/pytest -q`。
 
 ## T28 `[TODO]` confirm 卡片与回调匹配
 - `ctx.confirm(action, details)`:发钉钉互动卡片(按钮:确认/取消),`correlation_id` 藏卡片回调数据;挂起等回复。
