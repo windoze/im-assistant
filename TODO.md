@@ -226,13 +226,20 @@
   - 已补充单测覆盖 echo 占位工具调用后继续对话、handler 异常作为 error `tool_result` 回传、群聊 `can_use` 过滤、LLM tool 定义/消息块序列化和 Capability 工具元数据;README 已补充工具执行说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T18 `[TODO]` 首批应用级工具(无 OBO)
+## [DONE] T18 首批应用级工具(无 OBO)
 - `capabilities/system/`:
   - `contact_lookup`:userId↔姓名(用 T04 通讯录)。
   - `create_doc`:建钉钉文档 + 写入内容(参考 wecom 实测的建文档→写入闭环;钉钉用 `/v1.0/doc` 或知识库接口,`available_in=[dm,group]`,应用级 token)。
   - `create_todo`:创建待办(应用级 + unionId,dingtalk.md §3)。
 - 均 `requires=[]`(无 OBO)。
 - **验收**:群里说"帮我建个文档记录XX",机器人真的建出文档并回链接。
+- **完成记录(2026-07-07)**:
+  - 已为 capability handler 增加运行时服务注入,Stream 启动时将 `DingTalkClient` 与可选文档父级配置传入 agent loop,避免工具使用全局状态。
+  - 已扩展 `DingTalkClient`:保留 contact `unionId`,新增创建钉钉文档、追加文档文本块、创建待办任务的应用级 OpenAPI 封装与响应解析。
+  - 已在 `src/capabilities/system/` 增加 `contact_lookup`、`create_doc`、`create_todo`,三者均 `requires=[]`;`create_doc` 声明 `available_in=["dm", "group"]`,群聊使用需在 `capabilities.channel_enabled.<openConversationId>` 启用并配置 `dingtalk.document` 父级,或由工具入参提供父级。
+  - 已补充 README/config 说明和单测,覆盖服务注入、系统工具加载与 handler 行为、文档/待办 OpenAPI 请求体、contact unionId 解析和文档父级配置校验。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
+  - 当前环境无真实钉钉 `.env`/文档父级配置/群 `channel_enabled` 配置,未执行外部群聊真实建文档;具备凭据、机器人权限、文档/待办权限和配置后可用 `python -m src.main --stream` 进行人工验收。
 
 ## T19 `[TODO]` 【REVIEW】M3 能力层审阅
 - 审阅 T15–T18:Capability 模型是否贴合架构 §5;`can_use` 是否与 §6.1 完全一致(重点边界);工具执行错误处理;三级目录叠加正确性;首批工具是否真调用成功(非 mock)。

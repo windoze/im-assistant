@@ -22,6 +22,9 @@ OTO_MESSAGE_PATH = "/v1.0/robot/oToMessages/batchSend"
 GROUP_MESSAGE_PATH = "/v1.0/robot/groupMessages/send"
 CONTACT_USER_LIST_PATH_TEMPLATE = "/v1.0/contact/departments/{department_id}/users"
 CONTACT_USER_BY_ID_PATH_TEMPLATE = "/v1.0/contact/users/{user_id}"
+DOCUMENT_CREATE_PATH = "/v1.0/documents"
+DOCUMENT_CONTENT_BLOCKS_PATH_TEMPLATE = "/v1.0/documents/{doc_id}/contentBlocks"
+TODO_CREATE_PATH_TEMPLATE = "/v1.0/todo/users/{union_id}/tasks"
 TOKEN_HEADER = "x-acs-dingtalk-access-token"
 TOKEN_REFRESH_SKEW_SECONDS = 300
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -44,6 +47,24 @@ class DingTalkUser:
 
     user_id: str
     name: str
+    raw: Mapping[str, Any]
+    union_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DingTalkDocument:
+    """Normalized DingTalk document creation result."""
+
+    doc_id: str
+    raw: Mapping[str, Any]
+    url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DingTalkTodo:
+    """Normalized DingTalk todo creation result."""
+
+    task_id: str
     raw: Mapping[str, Any]
 
 
@@ -211,6 +232,69 @@ class DingTalkClient:
         )
         payload = await self.api_get(path)
         return _parse_contact_user(payload, method="GET", path=path)
+
+    async def create_document(
+        self,
+        *,
+        title: str,
+        parent_object_type: str,
+        parent_object_id: str,
+    ) -> DingTalkDocument:
+        """Create a DingTalk document with the application access token."""
+
+        request_body = {
+            "title": _non_empty_string(title, "title"),
+            "parentObjectType": _non_empty_string(parent_object_type, "parent_object_type"),
+            "parentObjectId": _non_empty_string(parent_object_id, "parent_object_id"),
+        }
+        payload = await self.api_post(DOCUMENT_CREATE_PATH, request_body)
+        return _parse_document(payload, method="POST", path=DOCUMENT_CREATE_PATH)
+
+    async def append_document_content(self, doc_id: str, text: str) -> Any:
+        """Append one text content block to a DingTalk document."""
+
+        normalized_doc_id = _non_empty_string(doc_id, "doc_id")
+        path = DOCUMENT_CONTENT_BLOCKS_PATH_TEMPLATE.format(
+            doc_id=_quote_path_segment(normalized_doc_id)
+        )
+        request_body = {
+            "contentBlockType": "text",
+            "blockContent": {"text": _non_empty_string(text, "text")},
+        }
+        return await self.api_post(path, request_body)
+
+    async def create_todo(
+        self,
+        *,
+        union_id: str,
+        subject: str,
+        creator_union_id: str,
+        executor_union_ids: Sequence[str],
+        description: str | None = None,
+        due_time: int | None = None,
+        priority: int | None = None,
+        detail_url: Mapping[str, str] | None = None,
+    ) -> DingTalkTodo:
+        """Create a DingTalk todo task for one user with application credentials."""
+
+        normalized_union_id = _non_empty_string(union_id, "union_id")
+        path = TODO_CREATE_PATH_TEMPLATE.format(union_id=_quote_path_segment(normalized_union_id))
+        request_body: dict[str, Any] = {
+            "subject": _non_empty_string(subject, "subject"),
+            "creatorId": _non_empty_string(creator_union_id, "creator_union_id"),
+            "executorIds": _normalize_union_ids(executor_union_ids),
+        }
+        if description is not None:
+            request_body["description"] = _non_empty_string(description, "description")
+        if due_time is not None:
+            request_body["dueTime"] = _non_negative_int(due_time, "due_time")
+        if priority is not None:
+            request_body["priority"] = _positive_int(priority, "priority")
+        if detail_url is not None:
+            request_body["detailUrl"] = _detail_url_mapping(detail_url)
+
+        payload = await self.api_post(path, request_body)
+        return _parse_todo(payload, method="POST", path=path)
 
     def _is_cached_token_fresh(self) -> bool:
         return self._clock() < self._refresh_after
@@ -397,6 +481,12 @@ def _normalize_user_ids(user_ids: Sequence[str]) -> list[str]:
     return normalized
 
 
+def _normalize_union_ids(union_ids: Sequence[str]) -> list[str]:
+    if isinstance(union_ids, (str, bytes)) or len(union_ids) == 0:
+        raise ValueError("executor_union_ids must contain at least one unionId")
+    return [_non_empty_string(union_id, "executor_union_id") for union_id in union_ids]
+
+
 def _text_msg_param(text: str) -> str:
     content = _non_empty_string(text, "text")
     return json.dumps({"content": content}, ensure_ascii=False, separators=(",", ":"))
@@ -420,10 +510,35 @@ def _normalize_page_size(page_size: int) -> int:
     return page_size
 
 
+def _non_negative_int(value: int, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
+def _positive_int(value: int, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return value
+
+
 def _non_empty_string(value: str, field_name: str) -> str:
     if not isinstance(value, str) or value.strip() == "":
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _detail_url_mapping(value: Mapping[str, str]) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError("detail_url must be a mapping")
+    normalized: dict[str, str] = {}
+    for key in ("url", "pcUrl"):
+        raw_value = value.get(key)
+        if raw_value is not None:
+            normalized[key] = _non_empty_string(raw_value, f"detail_url.{key}")
+    if not normalized:
+        raise ValueError("detail_url must include url or pcUrl")
+    return normalized
 
 
 def _quote_path_segment(value: str) -> str:
@@ -456,6 +571,7 @@ def _parse_contact_user(payload: Any, *, method: str, path: str) -> DingTalkUser
 
     user_id = _string_field(payload_object, "userId", "userid")
     name = _string_field(payload_object, "name", "username")
+    union_id = _string_field(payload_object, "unionId", "unionid")
     if user_id is None or name is None:
         raise DingTalkAPIError(
             method=method,
@@ -465,7 +581,45 @@ def _parse_contact_user(payload: Any, *, method: str, path: str) -> DingTalkUser
             errmsg="contact user response must include userId and name",
         )
 
-    return DingTalkUser(user_id=user_id, name=name, raw=dict(payload_object))
+    return DingTalkUser(user_id=user_id, name=name, raw=dict(payload_object), union_id=union_id)
+
+
+def _parse_document(payload: Any, *, method: str, path: str) -> DingTalkDocument:
+    payload_object = _response_object(payload, method=method, path=path)
+    result_object = _nested_result_object(payload_object)
+    doc_id = _string_field(result_object, "docId", "documentId", "id")
+    if doc_id is None:
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="document response must include docId",
+        )
+    url = _string_field(result_object, "url", "webUrl", "docUrl")
+    return DingTalkDocument(doc_id=doc_id, url=url, raw=dict(result_object))
+
+
+def _parse_todo(payload: Any, *, method: str, path: str) -> DingTalkTodo:
+    payload_object = _response_object(payload, method=method, path=path)
+    result_object = _nested_result_object(payload_object)
+    task_id = _string_field(result_object, "taskId", "todoId", "id")
+    if task_id is None:
+        raise DingTalkAPIError(
+            method=method,
+            path=path,
+            status_code=200,
+            errcode=None,
+            errmsg="todo response must include taskId or todoId",
+        )
+    return DingTalkTodo(task_id=task_id, raw=dict(result_object))
+
+
+def _nested_result_object(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    result = payload.get("result")
+    if isinstance(result, Mapping):
+        return result
+    return payload
 
 
 def _extract_next_page_token(payload: Any, *, method: str, path: str) -> str | None:

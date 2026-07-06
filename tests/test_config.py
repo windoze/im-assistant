@@ -36,6 +36,9 @@ capabilities:
 dingtalk:
   api_base: https://api.example.com/
   legacy_api_base: https://oapi.example.com/
+  document:
+    parent_object_type: wiki_space
+    parent_object_id: space-1
 logging:
   level: debug
 """,
@@ -53,6 +56,8 @@ logging:
     assert config.dingtalk.robot_code == "robot-code"
     assert config.dingtalk.api_base == "https://api.example.com"
     assert config.dingtalk.legacy_api_base == "https://oapi.example.com"
+    assert config.dingtalk.document.parent_object_type == "wiki_space"
+    assert config.dingtalk.document.parent_object_id == "space-1"
     assert config.llm.model == "claude-opus-test"
     assert config.llm.anthropic_api_key == "anthropic-key"
     assert config.session.confirm_timeout_sec == 42
@@ -105,4 +110,26 @@ capabilities:
     with pytest.raises(
         ConfigError, match="capabilities.channel_enabled.group-open-conversation-id"
     ):
+        load_config(config_path=config_path, env_path=env_path, environ={})
+
+
+def test_load_config_rejects_partial_dingtalk_document_defaults(tmp_path) -> None:
+    """Document parent defaults must be configured as a complete pair."""
+
+    config_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    config_path.write_text(
+        """
+dingtalk:
+  document:
+    parent_object_id: space-1
+""",
+        encoding="utf-8",
+    )
+    env_path.write_text(
+        "\n".join(f"{key}={value}" for key, value in REQUIRED_ENV.items()),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="dingtalk.document.parent_object_type"):
         load_config(config_path=config_path, env_path=env_path, environ={})

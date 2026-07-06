@@ -10,7 +10,14 @@ import httpx
 import pytest
 
 from src.infra.config import DingTalkConfig
-from src.infra.dingtalk_client import AccessToken, DingTalkAPIError, DingTalkClient, DingTalkUser
+from src.infra.dingtalk_client import (
+    AccessToken,
+    DingTalkAPIError,
+    DingTalkClient,
+    DingTalkDocument,
+    DingTalkTodo,
+    DingTalkUser,
+)
 
 
 def _config() -> DingTalkConfig:
@@ -258,6 +265,130 @@ async def test_user_by_id_fetches_and_normalizes_contact_user() -> None:
         name="Alice",
         raw={"userId": "user-1", "name": "Alice", "email": "alice@example.com"},
     )
+
+
+@pytest.mark.asyncio
+async def test_user_by_id_preserves_union_id_when_present() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        return httpx.Response(
+            200,
+            json={"userId": "user-1", "unionId": "union-1", "name": "Alice"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        user = await client.user_by_id("user-1")
+
+    assert user.union_id == "union-1"
+
+
+@pytest.mark.asyncio
+async def test_create_document_posts_parent_and_parses_document() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        assert request.method == "POST"
+        assert request.url.path == "/v1.0/documents"
+        assert request.headers["x-acs-dingtalk-access-token"] == "app-token"
+        assert json.loads(request.content) == {
+            "title": "Meeting Notes",
+            "parentObjectType": "wiki_space",
+            "parentObjectId": "space-1",
+        }
+        return httpx.Response(
+            200,
+            json={"result": {"docId": "doc-1", "url": "https://docs.example.com/doc-1"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        document = await client.create_document(
+            title="Meeting Notes",
+            parent_object_type="wiki_space",
+            parent_object_id="space-1",
+        )
+
+    assert document == DingTalkDocument(
+        doc_id="doc-1",
+        url="https://docs.example.com/doc-1",
+        raw={"docId": "doc-1", "url": "https://docs.example.com/doc-1"},
+    )
+    assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/documents"]
+
+
+@pytest.mark.asyncio
+async def test_append_document_content_posts_text_block() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        assert request.method == "POST"
+        assert request.url.path == "/v1.0/documents/doc-1/contentBlocks"
+        assert json.loads(request.content) == {
+            "contentBlockType": "text",
+            "blockContent": {"text": "hello doc"},
+        }
+        return httpx.Response(200, json={"blockId": "block-1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        payload = await client.append_document_content("doc-1", "hello doc")
+
+    assert payload == {"blockId": "block-1"}
+    assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/documents/doc-1/contentBlocks"]
+
+
+@pytest.mark.asyncio
+async def test_create_todo_posts_union_id_task_and_parses_result() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        assert request.method == "POST"
+        assert request.url.path == "/v1.0/todo/users/union-1/tasks"
+        assert json.loads(request.content) == {
+            "subject": "Submit report",
+            "creatorId": "creator-union",
+            "executorIds": ["union-1"],
+            "description": "before Friday",
+            "dueTime": 1783377600000,
+            "priority": 1,
+            "detailUrl": {"url": "https://example.com/todo"},
+        }
+        return httpx.Response(200, json={"result": {"taskId": "task-1"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        todo = await client.create_todo(
+            union_id="union-1",
+            subject="Submit report",
+            creator_union_id="creator-union",
+            executor_union_ids=["union-1"],
+            description="before Friday",
+            due_time=1783377600000,
+            priority=1,
+            detail_url={"url": "https://example.com/todo"},
+        )
+
+    assert todo == DingTalkTodo(task_id="task-1", raw={"taskId": "task-1"})
+    assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/todo/users/union-1/tasks"]
 
 
 @pytest.mark.asyncio

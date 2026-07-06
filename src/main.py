@@ -94,6 +94,15 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         channel_enabled_capabilities=(
                             app_config.capabilities.channel_enabled_capabilities
                         ),
+                        capability_services={
+                            "dingtalk_client": dingtalk_client,
+                            "dingtalk_document_defaults": {
+                                "parent_object_type": (
+                                    app_config.dingtalk.document.parent_object_type
+                                ),
+                                "parent_object_id": app_config.dingtalk.document.parent_object_id,
+                            },
+                        },
                     )
 
                     async def process_event(event: InboundEvent) -> None:

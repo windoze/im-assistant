@@ -146,7 +146,7 @@ def load_capabilities_from_directory(
 
     capabilities: list[Capability] = []
     for module_file in sorted(path.glob("*.py")):
-        if module_file.name == "__init__.py":
+        if module_file.name == "__init__.py" or module_file.name.startswith("_"):
             continue
         module = _load_module_from_file(module_file)
         capabilities.extend(_capabilities_from_module(module, origin=origin, owner_id=owner_id))

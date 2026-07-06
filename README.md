@@ -14,7 +14,7 @@ DingTalk OpenAPI calls, Claude responses, SQLite state, and encrypted user token
 
 3. Copy `.env.example` to `.env` and fill in the DingTalk and Anthropic values.
 4. Adjust non-secret settings such as the Claude model, DingTalk API base URL, session timeout,
-   SQLite database path, and log level in `config.yaml` when needed.
+   SQLite database path, document creation defaults, and log level in `config.yaml` when needed.
 
 ## Usage
 
@@ -57,6 +57,15 @@ Visible executable capabilities are exposed to Claude as tools. A capability may
 `description` and JSON-object `input_schema` metadata; its handler is called as
 `handler(context, **arguments)` with a `CapabilityExecutionContext`. Handler failures are returned to
 Claude as error `tool_result` blocks so the agent loop can continue to a normal text reply.
+
+The built-in system tier now includes three application-level DingTalk tools that use the app access
+token and do not require OBO authorization:
+
+| Tool | Purpose | Notes |
+|---|---|---|
+| `contact_lookup` | Look up DingTalk contacts by userId or display name. | Uses the contact APIs from the OpenAPI client. |
+| `create_doc` | Create a DingTalk document and append text content. | For group use, add `create_doc` to `capabilities.channel_enabled.<openConversationId>`. Configure `dingtalk.document.parent_object_type` and `dingtalk.document.parent_object_id`, or provide those fields as tool input. |
+| `create_todo` | Create a DingTalk todo task for the current actor or a specified assignee. | Resolves userId to unionId through the contact API, then calls the todo API with the app token. |
 
 Run tests:
 

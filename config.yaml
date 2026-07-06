@@ -13,6 +13,9 @@ capabilities:
 dingtalk:
   api_base: https://api.dingtalk.com
   legacy_api_base: https://oapi.dingtalk.com
+  document:
+    parent_object_type:
+    parent_object_id:
 
 logging:
   level: INFO

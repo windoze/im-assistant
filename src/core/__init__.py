@@ -6,6 +6,7 @@ from src.core.agent_loop import (
     AgentLoopToolError,
     AgentRunResult,
     CapabilityExecutionContext,
+    CapabilityServiceError,
     ToolExecutor,
 )
 from src.core.inbox import InboxEvent, SessionInbox, SessionInboxDispatcher
@@ -20,6 +21,7 @@ __all__ = [
     "AgentRunResult",
     "BotIdentity",
     "CapabilityExecutionContext",
+    "CapabilityServiceError",
     "GROUP_WELCOME_REPLY",
     "InboxEvent",
     "Principal",

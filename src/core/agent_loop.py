@@ -5,7 +5,8 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from src.capabilities import Capability, CapabilityChannelContext, CapabilityRegistry, can_use
@@ -28,6 +29,10 @@ class AgentLoopToolError(RuntimeError):
     """Raised when Claude tool-use orchestration cannot continue safely."""
 
 
+class CapabilityServiceError(RuntimeError):
+    """Raised when a capability requires a runtime service that was not provided."""
+
+
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:
     """Result produced by one agent-loop turn."""
@@ -42,6 +47,20 @@ class CapabilityExecutionContext:
 
     session: Session
     capability: Capability
+    services: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Freeze service mappings so handlers cannot mutate runtime wiring."""
+
+        object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
+
+    def require_service(self, name: str) -> object:
+        """Return a named runtime service or raise a clear handler-facing error."""
+
+        service_name = _non_empty_string(name, "service_name")
+        if service_name not in self.services:
+            raise CapabilityServiceError(f"Capability service is not configured: {service_name}")
+        return self.services[service_name]
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +135,7 @@ class AgentLoop:
         capability_registry: CapabilityRegistry | None = None,
         capability_registry_factory: Callable[[Session], CapabilityRegistry] | None = None,
         channel_enabled_capabilities: Mapping[str, Sequence[str]] | None = None,
+        capability_services: Mapping[str, object] | None = None,
         max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
     ) -> None:
         if capability_registry is not None and capability_registry_factory is not None:
@@ -132,6 +152,7 @@ class AgentLoop:
         self._channel_enabled_capabilities = _channel_enabled_capabilities(
             channel_enabled_capabilities or {}
         )
+        self._capability_services = MappingProxyType(dict(capability_services or {}))
         self._max_tool_iterations = _positive_int(max_tool_iterations, "max_tool_iterations")
 
     async def run(
@@ -322,7 +343,12 @@ class AgentLoop:
         capability = capabilities.get(tool_use.name)
         if capability is None:
             raise AgentLoopToolError(f"Tool is not available in this Session: {tool_use.name}")
-        return await _execute_capability_handler(session, capability, tool_use.arguments)
+        return await _execute_capability_handler(
+            session,
+            capability,
+            tool_use.arguments,
+            services=self._capability_services,
+        )
 
     async def _set_session_state(self, session: Session, state: SessionState) -> None:
         await self._store.upsert_session(_session_record_with_state(session, state))
@@ -406,11 +432,17 @@ async def _execute_capability_handler(
     session: Session,
     capability: Capability,
     arguments: Mapping[str, Any],
+    *,
+    services: Mapping[str, object],
 ) -> str:
     if capability.handler is None:
         raise AgentLoopToolError(f"Capability has no handler: {capability.name}")
 
-    context = CapabilityExecutionContext(session=session, capability=capability)
+    context = CapabilityExecutionContext(
+        session=session,
+        capability=capability,
+        services=services,
+    )
     result = capability.handler(context, **dict(arguments))
     if inspect.isawaitable(result):
         result = await result

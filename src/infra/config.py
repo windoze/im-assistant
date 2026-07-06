@@ -30,6 +30,14 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class DingTalkDocumentConfig:
+    """Default DingTalk document parent for app-level document creation."""
+
+    parent_object_type: str | None = None
+    parent_object_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DingTalkConfig:
     """DingTalk application credentials and OpenAPI endpoints."""
 
@@ -38,6 +46,7 @@ class DingTalkConfig:
     robot_code: str
     api_base: str
     legacy_api_base: str
+    document: DingTalkDocumentConfig = field(default_factory=DingTalkDocumentConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +123,7 @@ def load_config(
         raise ConfigError(f"Missing required configuration values: {', '.join(missing)}")
 
     dingtalk_section = _section(raw_config, "dingtalk")
+    dingtalk_document_section = _section(dingtalk_section, "document")
     llm_section = _section(raw_config, "llm")
     session_section = _section(raw_config, "session")
     storage_section = _section(raw_config, "storage")
@@ -131,6 +141,7 @@ def load_config(
                 "legacy_api_base",
                 "https://oapi.dingtalk.com",
             ),
+            document=_dingtalk_document_config(dingtalk_document_section),
         ),
         llm=LLMConfig(
             model=_non_empty_string(llm_section, "model", "claude-sonnet-5"),
@@ -213,6 +224,29 @@ def _non_empty_string(section: Mapping[str, Any], key: str, default: str) -> str
 
 def _url_string(section: Mapping[str, Any], key: str, default: str) -> str:
     return _non_empty_string(section, key, default).rstrip("/")
+
+
+def _optional_non_empty_string(section: Mapping[str, Any], key: str) -> str | None:
+    value = section.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip() == "":
+        raise ConfigError(f"`{key}` must be a non-empty string when provided")
+    return value.strip()
+
+
+def _dingtalk_document_config(section: Mapping[str, Any]) -> DingTalkDocumentConfig:
+    parent_object_type = _optional_non_empty_string(section, "parent_object_type")
+    parent_object_id = _optional_non_empty_string(section, "parent_object_id")
+    if (parent_object_type is None) != (parent_object_id is None):
+        raise ConfigError(
+            "`dingtalk.document.parent_object_type` and "
+            "`dingtalk.document.parent_object_id` must be configured together"
+        )
+    return DingTalkDocumentConfig(
+        parent_object_type=parent_object_type,
+        parent_object_id=parent_object_id,
+    )
 
 
 def _path_value(section: Mapping[str, Any], key: str, default: str, *, base_dir: Path) -> Path:

@@ -225,6 +225,47 @@ async def test_agent_loop_executes_visible_capability_tool_and_continues(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_injects_capability_services(tmp_path) -> None:
+    """Capability handlers should receive runtime services configured on the agent loop."""
+
+    def use_service(context: CapabilityExecutionContext) -> str:
+        return f"service={context.require_service('example')}"
+
+    registry = CapabilityRegistry(
+        [
+            Capability(
+                name="use_service",
+                origin="system",
+                available_in=["global"],
+                handler=use_service,
+            )
+        ]
+    )
+    llm_client = ToolCallingCompleter(
+        [
+            [{"type": "tool_use", "id": "toolu-service", "name": "use_service", "input": {}}],
+            [{"type": "text", "text": "service reply"}],
+        ]
+    )
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+            capability_services={"example": "configured"},
+        )
+
+        result = await agent_loop.run(session, "use a service")
+
+    tool_result = llm_client.calls[1]["messages"][-1]["content"][0]
+    assert result.reply_text == "service reply"
+    assert tool_result["content"] == "service=configured"
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_returns_tool_execution_errors_to_claude(tmp_path) -> None:
     """Handler failures should become tool_result errors rather than crashing the turn."""
 
