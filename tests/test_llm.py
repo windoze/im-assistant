@@ -42,6 +42,107 @@ async def test_complete_calls_anthropic_messages_api_and_returns_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_message_sends_tools_and_preserves_tool_use_blocks() -> None:
+    """Tool-capable calls should pass tools and keep Claude tool_use content."""
+
+    fake_client = FakeAnthropicClient(
+        FakeMessageResponse(
+            [
+                ToolUseBlock(
+                    type="tool_use",
+                    id="toolu-1",
+                    name="echo",
+                    input={"text": "hello"},
+                )
+            ]
+        )
+    )
+    llm_client = LLMClient(_config(), anthropic_client=fake_client, max_tokens=42)
+
+    response = await llm_client.create_message(
+        "system prompt",
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu-old",
+                        "name": "echo",
+                        "input": {"text": "old"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu-old",
+                        "content": "echo:old",
+                    }
+                ],
+            },
+        ],
+        tools=[
+            {
+                "name": "echo",
+                "description": "Echo text",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                },
+            }
+        ],
+    )
+
+    assert response.text == ""
+    assert response.tool_uses == (
+        {"type": "tool_use", "id": "toolu-1", "name": "echo", "input": {"text": "hello"}},
+    )
+    assert fake_client.messages.calls == [
+        {
+            "model": "claude-test-model",
+            "max_tokens": 42,
+            "system": "system prompt",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu-old",
+                            "name": "echo",
+                            "input": {"text": "old"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu-old",
+                            "content": "echo:old",
+                        }
+                    ],
+                },
+            ],
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "Echo text",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                    },
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_client_factory_receives_api_key_and_timeout_and_is_closed() -> None:
     """Owned SDK clients should be created from config and closed by the wrapper."""
 
@@ -114,6 +215,14 @@ class TextBlock:
 @dataclass(frozen=True, slots=True)
 class ToolBlock:
     type: str = "tool_use"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolUseBlock:
+    type: str
+    id: str
+    name: str
+    input: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)

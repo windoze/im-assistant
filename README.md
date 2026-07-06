@@ -53,6 +53,11 @@ on-behalf-of user authority are hidden outside DMs, globally available capabilit
 everywhere, user capabilities are visible only to their owner in DM, and group capabilities must be
 listed under `capabilities.channel_enabled.<channel_id>` in `config.yaml`.
 
+Visible executable capabilities are exposed to Claude as tools. A capability may provide
+`description` and JSON-object `input_schema` metadata; its handler is called as
+`handler(context, **arguments)` with a `CapabilityExecutionContext`. Handler failures are returned to
+Claude as error `tool_result` blocks so the agent loop can continue to a normal text reply.
+
 Run tests:
 
 ```bash

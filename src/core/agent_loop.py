@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import inspect
+import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+from src.capabilities import Capability, CapabilityChannelContext, CapabilityRegistry, can_use
 from src.core.session import Session, SessionState
 from src.infra.log import get_logger
 from src.infra.store import MessageRecord, MessageRole, SessionRecord
@@ -13,11 +16,16 @@ from src.infra.store import MessageRecord, MessageRole, SessionRecord
 logger = get_logger(__name__)
 
 DEFAULT_HISTORY_LIMIT = 20
+DEFAULT_MAX_TOOL_ITERATIONS = 8
 AgentRunStatus = Literal["completed"]
 
 
 class AgentLoopStateError(RuntimeError):
     """Raised when a Session state cannot enter the current agent loop."""
+
+
+class AgentLoopToolError(RuntimeError):
+    """Raised when Claude tool-use orchestration cannot continue safely."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,11 +36,35 @@ class AgentRunResult:
     status: AgentRunStatus = "completed"
 
 
+@dataclass(frozen=True, slots=True)
+class CapabilityExecutionContext:
+    """Runtime context injected into capability handlers."""
+
+    session: Session
+    capability: Capability
+
+
+@dataclass(frozen=True, slots=True)
+class ToolUseRequest:
+    """One Claude tool-use request extracted from assistant response content."""
+
+    id: str
+    name: str
+    arguments: Mapping[str, Any]
+
+
 class TextCompleter(Protocol):
     """LLM interface consumed by the agent loop."""
 
-    async def complete(self, system: str, messages: Sequence[Mapping[str, str]]) -> str:
+    async def complete(self, system: str, messages: Sequence[Mapping[str, Any]]) -> str:
         """Return a text completion for the supplied prompt and chat history."""
+
+
+class ToolUseResponse(Protocol):
+    """Normalized LLM response shape needed by the tool-use loop."""
+
+    content: Sequence[Mapping[str, Any]]
+    text: str
 
 
 class AgentLoopStore(Protocol):
@@ -81,12 +113,26 @@ class AgentLoop:
         system_prompt: str,
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         tool_executor: ToolExecutor | None = None,
+        capability_registry: CapabilityRegistry | None = None,
+        capability_registry_factory: Callable[[Session], CapabilityRegistry] | None = None,
+        channel_enabled_capabilities: Mapping[str, Sequence[str]] | None = None,
+        max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
     ) -> None:
+        if capability_registry is not None and capability_registry_factory is not None:
+            raise ValueError(
+                "capability_registry and capability_registry_factory cannot both be provided"
+            )
         self._store = store
         self._llm_client = llm_client
         self._system_prompt = _non_empty_string(system_prompt, "system_prompt")
         self._history_limit = _positive_int(history_limit, "history_limit")
         self._tool_executor = tool_executor
+        self._capability_registry = capability_registry
+        self._capability_registry_factory = capability_registry_factory
+        self._channel_enabled_capabilities = _channel_enabled_capabilities(
+            channel_enabled_capabilities or {}
+        )
+        self._max_tool_iterations = _positive_int(max_tool_iterations, "max_tool_iterations")
 
     async def run(
         self,
@@ -109,15 +155,24 @@ class AgentLoop:
             )
             llm_messages = _llm_messages_from_history(history)
             llm_messages.append({"role": "user", "content": normalized_text})
+            visible_capabilities = self._visible_capabilities(session)
             logger.debug(
                 "agent_loop_started",
                 extra={
                     "session_id": session.session_id,
                     "history_messages": len(llm_messages) - 1,
+                    "tools": len(visible_capabilities),
                 },
             )
 
-            reply_text = await self._llm_client.complete(self._system_prompt, llm_messages)
+            if visible_capabilities:
+                reply_text = await self._complete_with_tools(
+                    session,
+                    llm_messages,
+                    visible_capabilities,
+                )
+            else:
+                reply_text = await self._llm_client.complete(self._system_prompt, llm_messages)
             await self._persist_completed_turn(
                 session,
                 user_text=normalized_text,
@@ -158,6 +213,117 @@ class AgentLoop:
             metadata={"status": "completed"},
         )
 
+    def _visible_capabilities(self, session: Session) -> list[Capability]:
+        registry = self._registry_for_session(session)
+        if registry is None:
+            return []
+
+        channel = _channel_context_for_session(session, self._channel_enabled_capabilities)
+        return [
+            capability
+            for capability in registry.list()
+            if (self._tool_executor is not None or capability.handler is not None)
+            and can_use(capability, session.kind, session.actor, channel)
+        ]
+
+    def _registry_for_session(self, session: Session) -> CapabilityRegistry | None:
+        if self._capability_registry_factory is not None:
+            registry = self._capability_registry_factory(session)
+            if not isinstance(registry, CapabilityRegistry):
+                raise TypeError("capability_registry_factory must return a CapabilityRegistry")
+            return registry
+        return self._capability_registry
+
+    async def _complete_with_tools(
+        self,
+        session: Session,
+        llm_messages: Sequence[Mapping[str, Any]],
+        capabilities: Sequence[Capability],
+    ) -> str:
+        messages = [dict(message) for message in llm_messages]
+        tools = [_claude_tool_definition(capability) for capability in capabilities]
+        capabilities_by_name = {capability.name: capability for capability in capabilities}
+
+        for _ in range(self._max_tool_iterations):
+            response = await self._create_tool_message(messages, tools)
+            response_content = [dict(block) for block in response.content]
+            tool_uses = _tool_uses_from_content(response_content)
+            if not tool_uses:
+                reply_text = response.text.strip()
+                if reply_text == "":
+                    raise AgentLoopToolError("Claude response did not include final text")
+                return reply_text
+
+            messages.append({"role": "assistant", "content": response_content})
+            tool_results = [
+                await self._tool_result_for_call(session, tool_use, capabilities_by_name)
+                for tool_use in tool_uses
+            ]
+            messages.append({"role": "user", "content": tool_results})
+
+        raise AgentLoopToolError("Claude tool loop exceeded max_tool_iterations")
+
+    async def _create_tool_message(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ToolUseResponse:
+        create_message = getattr(self._llm_client, "create_message", None)
+        if not callable(create_message):
+            raise AgentLoopToolError(
+                "llm_client must support create_message when capabilities are visible"
+            )
+        return await create_message(self._system_prompt, messages, tools=tools)
+
+    async def _tool_result_for_call(
+        self,
+        session: Session,
+        tool_use: ToolUseRequest,
+        capabilities: Mapping[str, Capability],
+    ) -> dict[str, Any]:
+        try:
+            result = await self._execute_tool_call(session, tool_use, capabilities)
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": result,
+            }
+        except Exception as exc:
+            logger.exception(
+                "agent_loop_tool_execution_failed",
+                extra={
+                    "session_id": session.session_id,
+                    "tool_name": tool_use.name,
+                    "tool_use_id": tool_use.id,
+                },
+            )
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": f"Tool {tool_use.name} failed: {exc}",
+                "is_error": True,
+            }
+
+    async def _execute_tool_call(
+        self,
+        session: Session,
+        tool_use: ToolUseRequest,
+        capabilities: Mapping[str, Capability],
+    ) -> str:
+        if self._tool_executor is not None:
+            return _tool_result_text(
+                await self._tool_executor.execute(
+                    session=session,
+                    name=tool_use.name,
+                    arguments=tool_use.arguments,
+                )
+            )
+
+        capability = capabilities.get(tool_use.name)
+        if capability is None:
+            raise AgentLoopToolError(f"Tool is not available in this Session: {tool_use.name}")
+        return await _execute_capability_handler(session, capability, tool_use.arguments)
+
     async def _set_session_state(self, session: Session, state: SessionState) -> None:
         await self._store.upsert_session(_session_record_with_state(session, state))
 
@@ -170,12 +336,112 @@ def _ensure_idle(session: Session) -> None:
     raise AgentLoopStateError(f"Session cannot enter agent loop from state: {session.state}")
 
 
-def _llm_messages_from_history(history: Sequence[MessageRecord]) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
+def _llm_messages_from_history(history: Sequence[MessageRecord]) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
     for record in history:
         if record.role in ("user", "assistant"):
             messages.append({"role": record.role, "content": record.content})
     return messages
+
+
+def _channel_context_for_session(
+    session: Session,
+    channel_enabled_capabilities: Mapping[str, Sequence[str]],
+) -> CapabilityChannelContext | None:
+    if session.kind != "group":
+        return None
+    channel_id = _group_channel_id(session)
+    return CapabilityChannelContext(
+        id=channel_id,
+        enabled_capabilities=channel_enabled_capabilities.get(channel_id, ()),
+    )
+
+
+def _group_channel_id(session: Session) -> str:
+    open_conversation_id = session.context.get("open_conversation_id")
+    if isinstance(open_conversation_id, str) and open_conversation_id.strip() != "":
+        return open_conversation_id.strip()
+    return session.conversation_id
+
+
+def _claude_tool_definition(capability: Capability) -> dict[str, Any]:
+    return {
+        "name": capability.name,
+        "description": _capability_description(capability),
+        "input_schema": dict(capability.input_schema),
+    }
+
+
+def _capability_description(capability: Capability) -> str:
+    if capability.description is not None:
+        return capability.description
+    if capability.handler is not None:
+        doc = inspect.getdoc(capability.handler)
+        if doc is not None and doc.strip() != "":
+            return doc.strip().splitlines()[0]
+    return f"Capability {capability.name}"
+
+
+def _tool_uses_from_content(content: Sequence[Mapping[str, Any]]) -> list[ToolUseRequest]:
+    tool_uses: list[ToolUseRequest] = []
+    for block in content:
+        if block.get("type") != "tool_use":
+            continue
+        raw_arguments = block.get("input", {})
+        if raw_arguments is None:
+            raw_arguments = {}
+        if not isinstance(raw_arguments, Mapping):
+            raise AgentLoopToolError("Claude tool_use input must be a mapping")
+        tool_uses.append(
+            ToolUseRequest(
+                id=_non_empty_string(block.get("id"), "tool_use.id"),
+                name=_non_empty_string(block.get("name"), "tool_use.name"),
+                arguments=dict(raw_arguments),
+            )
+        )
+    return tool_uses
+
+
+async def _execute_capability_handler(
+    session: Session,
+    capability: Capability,
+    arguments: Mapping[str, Any],
+) -> str:
+    if capability.handler is None:
+        raise AgentLoopToolError(f"Capability has no handler: {capability.name}")
+
+    context = CapabilityExecutionContext(session=session, capability=capability)
+    result = capability.handler(context, **dict(arguments))
+    if inspect.isawaitable(result):
+        result = await result
+    return _tool_result_text(result)
+
+
+def _tool_result_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _channel_enabled_capabilities(
+    values: Mapping[str, Sequence[str]],
+) -> dict[str, tuple[str, ...]]:
+    normalized: dict[str, tuple[str, ...]] = {}
+    for channel_id, capability_names in values.items():
+        if isinstance(capability_names, (str, bytes)) or not isinstance(
+            capability_names,
+            Sequence,
+        ):
+            raise ValueError("channel_enabled_capabilities values must be sequences")
+        normalized[_non_empty_string(channel_id, "channel_id")] = tuple(
+            _non_empty_string(name, "channel_enabled_capability") for name in capability_names
+        )
+    return normalized
 
 
 def _session_record_with_state(session: Session, state: SessionState) -> SessionRecord:

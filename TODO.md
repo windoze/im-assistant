@@ -215,10 +215,16 @@
   - 已补充单测覆盖 §6.1 每条分支、群聊 OBO 过滤和无效 channel-enabled 配置;README 已说明能力可见性规则和群能力配置位置。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T17 `[TODO]` agent loop 接入工具执行(Claude tool use)
+## [DONE] T17 agent loop 接入工具执行(Claude tool use)
 - `core/agent_loop.py`:把 `can_use` 过滤后的能力转成 Claude tool 定义;LLM 请求工具 → 执行 handler → 回填结果 → 继续循环,直到无工具调用。
 - 工具执行错误 → 作为 tool_result 回给 LLM(不崩溃)。
 - **验收**:LLM 能选择并调用一个占位工具(如 echo),结果回填后继续对话。
+- **完成记录(2026-07-07)**:
+  - 已为 `Capability` 增加可选 `description` 与 JSON-object `input_schema`,用于生成 Claude tool 定义,同时保持既有能力声明兼容。
+  - 已在 `LLMClient` 增加 `create_message(...)`,支持发送 `tools`、保留 Claude `tool_use` content block,并支持 tool-result 消息回填;原 `complete(...)` 文本接口保持可用。
+  - 已在 `AgentLoop` 中按当前 Session 使用 `can_use` 过滤可执行能力,将其暴露为 Claude tools,执行 `handler(context, **arguments)`,把成功或错误结果回填为 `tool_result`,并循环直到最终文本回复;Stream 启动时按 Session 加载 system/base/user 能力并接入群 `channel_enabled` 配置。
+  - 已补充单测覆盖 echo 占位工具调用后继续对话、handler 异常作为 error `tool_result` 回传、群聊 `can_use` 过滤、LLM tool 定义/消息块序列化和 Capability 工具元数据;README 已补充工具执行说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T18 `[TODO]` 首批应用级工具(无 OBO)
 - `capabilities/system/`:

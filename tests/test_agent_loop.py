@@ -4,10 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
-from src.core import Actor, AgentLoop, AgentLoopStateError, BotIdentity, Principal, Session
+from src.capabilities import Capability, CapabilityRegistry, Requirement
+from src.core import (
+    Actor,
+    AgentLoop,
+    AgentLoopStateError,
+    BotIdentity,
+    CapabilityExecutionContext,
+    Principal,
+    Session,
+)
 from src.infra.store import SessionRecord, SQLiteStore
 
 
@@ -101,6 +112,202 @@ async def test_agent_loop_limits_loaded_history_to_recent_messages(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_executes_visible_capability_tool_and_continues(tmp_path) -> None:
+    """Claude tool_use requests should execute a visible capability and continue."""
+
+    async def echo(context: CapabilityExecutionContext, *, text: str) -> str:
+        """Echo text back to Claude."""
+
+        return f"{context.session.session_id}:{text}"
+
+    registry = CapabilityRegistry(
+        [
+            Capability(
+                name="echo",
+                origin="system",
+                available_in=["global"],
+                handler=echo,
+                description="Echo text",
+                input_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            )
+        ]
+    )
+    llm_client = ToolCallingCompleter(
+        [
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu-1",
+                    "name": "echo",
+                    "input": {"text": "hello"},
+                }
+            ],
+            [{"type": "text", "text": "final reply"}],
+        ]
+    )
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+        )
+
+        result = await agent_loop.run(session, "please echo")
+        stored_messages = await store.list_messages(session.session_id)
+
+    assert result.reply_text == "final reply"
+    assert llm_client.calls == [
+        {
+            "system": "system prompt",
+            "messages": [{"role": "user", "content": "please echo"}],
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "Echo text",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                    },
+                }
+            ],
+        },
+        {
+            "system": "system prompt",
+            "messages": [
+                {"role": "user", "content": "please echo"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu-1",
+                            "name": "echo",
+                            "input": {"text": "hello"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu-1",
+                            "content": "dingtalk:dm:conversation-1:hello",
+                        }
+                    ],
+                },
+            ],
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "Echo text",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                    },
+                }
+            ],
+        },
+    ]
+    assert [(message.role, message.content) for message in stored_messages] == [
+        ("user", "please echo"),
+        ("assistant", "final reply"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_returns_tool_execution_errors_to_claude(tmp_path) -> None:
+    """Handler failures should become tool_result errors rather than crashing the turn."""
+
+    async def explode(_context: CapabilityExecutionContext) -> str:
+        raise RuntimeError("boom")
+
+    registry = CapabilityRegistry(
+        [
+            Capability(
+                name="explode",
+                origin="system",
+                available_in=["global"],
+                handler=explode,
+            )
+        ]
+    )
+    llm_client = ToolCallingCompleter(
+        [
+            [{"type": "tool_use", "id": "toolu-err", "name": "explode", "input": {}}],
+            [{"type": "text", "text": "handled failure"}],
+        ]
+    )
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+        )
+
+        result = await agent_loop.run(session, "please fail")
+
+    tool_result = llm_client.calls[1]["messages"][-1]["content"][0]
+    assert result.reply_text == "handled failure"
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["tool_use_id"] == "toolu-err"
+    assert tool_result["is_error"] is True
+    assert "Tool explode failed: boom" in tool_result["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_exposes_only_can_use_filtered_group_capabilities(tmp_path) -> None:
+    """Group-mode tools should be filtered through channel-enabled can_use rules."""
+
+    def noop(_context: CapabilityExecutionContext) -> str:
+        return "ok"
+
+    registry = CapabilityRegistry(
+        [
+            Capability(name="enabled_group", origin="system", available_in=["group"], handler=noop),
+            Capability(
+                name="disabled_group", origin="system", available_in=["group"], handler=noop
+            ),
+            Capability(
+                name="obo_global",
+                origin="system",
+                available_in=["global"],
+                requires=[Requirement(service="calendar", on_behalf_of="actor")],
+                handler=noop,
+            ),
+        ]
+    )
+    llm_client = ToolCallingCompleter([[{"type": "text", "text": "group reply"}]])
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_group_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+            channel_enabled_capabilities={"group-open-conversation-id": ("enabled_group",)},
+        )
+
+        result = await agent_loop.run(session, "group request")
+
+    assert result.reply_text == "group reply"
+    assert [tool["name"] for tool in llm_client.calls[0]["tools"]] == ["enabled_group"]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_sets_running_state_while_completion_is_pending(tmp_path) -> None:
     """The Session should persist RunningAgent during the LLM call and return to Idle."""
 
@@ -178,6 +385,38 @@ async def _stored_session(store: SQLiteStore, *, state: str = "Idle") -> Session
     )
 
 
+async def _stored_group_session(store: SQLiteStore) -> Session:
+    await store.initialize()
+    record = await store.upsert_session(
+        SessionRecord(
+            session_id="dingtalk:group:conversation-1",
+            conversation_id="conversation-1",
+            kind="group",
+            bot_id="robot-code",
+            principal_id="group:group-open-conversation-id",
+            actor_id="user-1",
+            state="Idle",
+            context={
+                "platform": "dingtalk",
+                "open_conversation_id": "group-open-conversation-id",
+            },
+        )
+    )
+    return Session(
+        session_id=record.session_id,
+        conversation_id=record.conversation_id,
+        kind=record.kind,
+        bot=BotIdentity(id=record.bot_id),
+        principal=Principal(kind="group", id=record.principal_id),
+        actor=Actor(id="user-1", display_name="Alice"),
+        context=record.context,
+        state=record.state,
+        lifecycle=record.lifecycle,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
 class FakeCompleter:
     """Fake LLM client that records completion inputs."""
 
@@ -203,3 +442,57 @@ class BlockingCompleter(FakeCompleter):
         self._started.set()
         await self._release.wait()
         return self._reply
+
+
+class ToolCallingCompleter:
+    """Fake LLM client that returns scripted Claude content blocks."""
+
+    def __init__(self, responses: Sequence[Sequence[Mapping[str, Any]]]) -> None:
+        self._responses = [[dict(block) for block in response] for response in responses]
+        self.calls: list[dict[str, Any]] = []
+
+    async def complete(self, system: str, messages: Sequence[Mapping[str, Any]]) -> str:
+        raise AssertionError("tool tests should use create_message")
+
+    async def create_message(
+        self,
+        system: str,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] = (),
+    ) -> FakeToolResponse:
+        self.calls.append(
+            {
+                "system": system,
+                "messages": _copy_messages(messages),
+                "tools": [dict(tool) for tool in tools],
+            }
+        )
+        if not self._responses:
+            raise AssertionError("no scripted LLM response remaining")
+        return FakeToolResponse(tuple(self._responses.pop(0)))
+
+
+@dataclass(frozen=True, slots=True)
+class FakeToolResponse:
+    """Fake normalized response object returned by ToolCallingCompleter."""
+
+    content: tuple[dict[str, Any], ...]
+
+    @property
+    def text(self) -> str:
+        return "".join(
+            block["text"]
+            for block in self.content
+            if block.get("type") == "text" and isinstance(block.get("text"), str)
+        ).strip()
+
+
+def _copy_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    copied: list[dict[str, Any]] = []
+    for message in messages:
+        content = message["content"]
+        if isinstance(content, list):
+            content = [dict(block) for block in content]
+        copied.append({"role": message["role"], "content": content})
+    return copied

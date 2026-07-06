@@ -40,12 +40,20 @@ def test_capability_model_normalizes_metadata_and_detects_user_authority() -> No
         requires=[requirement],
         sensitivity="high",
         handler=lambda: "ok",
+        description="Summarize a user's calendar",
+        input_schema={
+            "type": "object",
+            "properties": {"date": {"type": "string"}},
+            "required": ["date"],
+        },
     )
 
     assert capability.available_in == ("dm",)
     assert capability.requires == (requirement,)
     assert requirement.scopes == ("calendar:read",)
     assert capability.requires_user_authority is True
+    assert capability.description == "Summarize a user's calendar"
+    assert capability.input_schema["type"] == "object"
 
 
 def test_capability_model_rejects_invalid_metadata() -> None:
@@ -59,6 +67,9 @@ def test_capability_model_rejects_invalid_metadata() -> None:
 
     with pytest.raises(ValueError, match="requires"):
         Capability(name="bad", origin="system", available_in=["global"], requires=["calendar"])
+
+    with pytest.raises(ValueError, match="input_schema.type"):
+        Capability(name="bad", origin="system", available_in=["global"], input_schema={})
 
 
 def test_registry_registers_replaces_and_lists_capabilities() -> None:

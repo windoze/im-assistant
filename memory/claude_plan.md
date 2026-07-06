@@ -9,7 +9,7 @@ I will not record private chain-of-thought here; this file contains the operatio
 5. Update `TODO.md` with a `[DONE]` prefix and completion record if the task is completed, or record any prerequisite/blocker without marking it done.
 6. Update this file at key milestones and commit all relevant changes with a descriptive message.
 
-Status: Starting a new invocation. I will complete exactly the first incomplete task in `TODO.md`, then stop.
+Status: Starting a new invocation for T17. I will complete exactly the first incomplete task in `TODO.md`, then stop.
 
 Planned steps:
 1. Read `TODO.md` and identify the first heading that is not prefixed with `[DONE]`.
@@ -22,8 +22,13 @@ Planned steps:
 8. Commit all changes for this task with a clear message and stop without starting the next task.
 
 Progress:
-- Updated this plan file before inspecting the project task list.
-- Selected T16 as the first incomplete task. Latest commit T15 is directly relevant as the registry prerequisite.
-- Baseline Ruff lint and pytest passed before code edits.
-- Implemented the T16 `can_use` visibility gate, channel-enabled capability config parsing, tests, README note, and `[DONE]` completion record.
-- Final validation passed with Ruff formatting, Ruff lint, pytest, and `python -m src.main`; ready to commit T16.
+- Existing plan file found; refreshed it for this invocation.
+- Read `TODO.md` task headings and selected T17 (`agent loop 接入工具执行(Claude tool use)`) as the first incomplete task.
+- Latest commit is T16, which is directly relevant as the capability visibility prerequisite for T17.
+- Inspected the T17 task body, capability model/registry, LLM wrapper, session runtime, and architecture sections for capability visibility and tool execution.
+- Implementation plan: add tool schema metadata to capabilities, add Anthropic `create_message` support for tool definitions/tool-use blocks, wire `AgentLoop` to expose `can_use`-filtered executable capabilities, execute handlers with a runtime context, return handler errors as Claude `tool_result` errors, then continue until a final text reply.
+- Baseline Ruff formatting, Ruff lint, and pytest passed before code edits.
+- Implemented capability tool metadata, Anthropic tool-message support, agent-loop tool execution/continuation, runtime registry loading, README documentation, and T17 tests.
+- Final validation passed after the normalizer cleanup: `.venv/bin/ruff format .`, `.venv/bin/ruff check .`, `.venv/bin/pytest -q`, and `python -m src.main`.
+- Marked T17 `[DONE]` in `TODO.md` with completion details.
+- Next step is to inspect the worktree and commit all changes for T17.

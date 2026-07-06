@@ -65,6 +65,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
         return
 
     from src.adapters.dingtalk import DingTalkOutbound, DingTalkStreamAdapter
+    from src.capabilities import load_capability_registry
     from src.core import AgentLoop, SessionInboxDispatcher, SessionManager
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
@@ -77,6 +78,11 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
     async with SQLiteStore(app_config.storage.database_path) as store:
         await store.initialize()
         session_manager = SessionManager(store, bot_id=app_config.dingtalk.robot_code)
+
+        def capability_registry_for_session(session: Session):
+            user_id = session.actor.id if session.kind == "dm" else None
+            return load_capability_registry(user_id=user_id)
+
         async with DingTalkClient(app_config.dingtalk) as dingtalk_client:
             async with DingTalkOutbound(dingtalk_client) as outbound:
                 async with LLMClient(app_config.llm) as llm_client:
@@ -84,6 +90,10 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         store,
                         llm_client,
                         system_prompt=ASSISTANT_SYSTEM_PROMPT,
+                        capability_registry_factory=capability_registry_for_session,
+                        channel_enabled_capabilities=(
+                            app_config.capabilities.channel_enabled_capabilities
+                        ),
                     )
 
                     async def process_event(event: InboundEvent) -> None:
