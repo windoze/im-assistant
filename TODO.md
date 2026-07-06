@@ -43,12 +43,17 @@
   - 已补充配置加载与日志可用性单测,并更新 README 的配置说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
-## T03 `[TODO]` 钉钉应用级 access_token 客户端
+## [DONE] T03 钉钉应用级 access_token 客户端
 - `infra/dingtalk_client.py`:`DingTalkClient`。
   - `async get_access_token()`:调 `POST https://api.dingtalk.com/v1.0/oauth2/accessToken`(body `appKey`/`appSecret`),返回 `accessToken`+`expireIn`。
   - **进程内缓存 + 提前 5 分钟刷新**;并发安全(asyncio.Lock)。
   - `async api_post(path, json, use_user_token=None)` / `api_get(...)`:自动带 `x-acs-dingtalk-access-token`(应用级或传入的用户级);统一错误处理(记录 errcode/errmsg)。
 - **验收**:能拿到 token 并缓存;第二次调用不重复请求网络(单测用 mock)。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/infra/dingtalk_client.py`,实现 `DingTalkClient`、`AccessToken`、`DingTalkAPIError`、应用级 access_token 获取和 `asyncio.Lock` 保护的进程内缓存。
+  - 已实现提前 5 分钟刷新、`api_post` / `api_get` 自动注入 `x-acs-dingtalk-access-token`(应用级或传入用户级 token),并对 HTTP/API 错误记录 `errcode`/`errmsg` 后抛出异常。
+  - 已补充 mock 单测覆盖 token 获取与缓存、提前刷新、并发只请求一次、应用/用户 token 请求头和 API 错误日志。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
 ## T04 `[TODO]` 出站发送与通讯录冒烟
 - 在 `DingTalkClient` 加:
