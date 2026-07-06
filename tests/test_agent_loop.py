@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -263,6 +264,12 @@ async def test_agent_loop_injects_capability_services(tmp_path) -> None:
     tool_result = llm_client.calls[1]["messages"][-1]["content"][0]
     assert result.reply_text == "service reply"
     assert tool_result["content"] == "service=configured"
+    assert llm_client.calls[0]["tools"][0]["input_schema"] == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": True,
+    }
+    json.dumps(llm_client.calls[0]["tools"])
 
 
 @pytest.mark.asyncio

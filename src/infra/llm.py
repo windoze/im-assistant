@@ -281,7 +281,27 @@ def _tool_schema_mapping(value: object) -> dict[str, Any]:
     schema = dict(value)
     if schema.get("type") != "object":
         raise ValueError("tool.input_schema.type must be 'object'")
-    return schema
+    return _plain_json_object(schema, "tool.input_schema")
+
+
+def _plain_json_object(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:
+    return {
+        _non_empty_string(key, f"{field_name}.key"): _plain_json_value(
+            nested_value,
+            f"{field_name}.{key}",
+        )
+        for key, nested_value in value.items()
+    }
+
+
+def _plain_json_value(value: Any, field_name: str) -> Any:
+    if isinstance(value, Mapping):
+        return _plain_json_object(value, field_name)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain_json_value(item, field_name) for item in value]
+    raise ValueError(f"{field_name} must be JSON-compatible")
 
 
 def _response_content(response: Any) -> Any:

@@ -394,7 +394,7 @@ def _claude_tool_definition(capability: Capability) -> dict[str, Any]:
     return {
         "name": capability.name,
         "description": _capability_description(capability),
-        "input_schema": dict(capability.input_schema),
+        "input_schema": _plain_json_object(capability.input_schema, "input_schema"),
     }
 
 
@@ -458,6 +458,26 @@ def _tool_result_text(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     except TypeError:
         return str(value)
+
+
+def _plain_json_object(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:
+    return {
+        _non_empty_string(key, f"{field_name}.key"): _plain_json_value(
+            nested_value,
+            f"{field_name}.{key}",
+        )
+        for key, nested_value in value.items()
+    }
+
+
+def _plain_json_value(value: Any, field_name: str) -> Any:
+    if isinstance(value, Mapping):
+        return _plain_json_object(value, field_name)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain_json_value(item, field_name) for item in value]
+    raise ValueError(f"{field_name} must be JSON-compatible")
 
 
 def _channel_enabled_capabilities(

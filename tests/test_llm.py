@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -140,6 +142,46 @@ async def test_create_message_sends_tools_and_preserves_tool_use_blocks() -> Non
             ],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_message_normalizes_tool_schema_to_plain_json_containers() -> None:
+    """Tool schemas may originate from immutable capability metadata but must serialize."""
+
+    fake_client = FakeAnthropicClient(FakeMessageResponse([TextBlock("text", "ok")]))
+    llm_client = LLMClient(_config(), anthropic_client=fake_client)
+
+    await llm_client.create_message(
+        "system prompt",
+        [{"role": "user", "content": "question"}],
+        tools=[
+            {
+                "name": "default_schema_tool",
+                "description": "Uses the default capability schema",
+                "input_schema": MappingProxyType(
+                    {
+                        "type": "object",
+                        "properties": MappingProxyType({}),
+                        "additionalProperties": True,
+                    }
+                ),
+            }
+        ],
+    )
+
+    tools = fake_client.messages.calls[0]["tools"]
+    assert tools == [
+        {
+            "name": "default_schema_tool",
+            "description": "Uses the default capability schema",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            },
+        }
+    ]
+    json.dumps(tools)
 
 
 @pytest.mark.asyncio

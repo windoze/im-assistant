@@ -241,9 +241,15 @@
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
   - 当前环境无真实钉钉 `.env`/文档父级配置/群 `channel_enabled` 配置,未执行外部群聊真实建文档;具备凭据、机器人权限、文档/待办权限和配置后可用 `python -m src.main --stream` 进行人工验收。
 
-## T19 `[TODO]` 【REVIEW】M3 能力层审阅
+## [DONE] T19 【REVIEW】M3 能力层审阅
 - 审阅 T15–T18:Capability 模型是否贴合架构 §5;`can_use` 是否与 §6.1 完全一致(重点边界);工具执行错误处理;三级目录叠加正确性;首批工具是否真调用成功(非 mock)。
 - 跑 `ruff`+`pytest`;端到端验证建文档;输出问题清单并修复。
+- **完成记录(2026-07-07)**:
+  - 已审阅 T15–T18 的 Capability/Requirement 模型、三级目录加载与覆盖顺序、`can_use` §6.1 可见性分支、Claude tool-use 循环、handler 错误回填、运行时服务注入和 `contact_lookup` / `create_doc` / `create_todo` 应用级工具。
+  - 问题清单:发现默认 `Capability.input_schema` 使用不可变 `MappingProxyType` 时,tool 定义中嵌套 mapping 可能无法被 Anthropic SDK JSON 序列化。已修复 AgentLoop 和 LLMClient 的 tool schema 归一化,递归转换为普通 JSON 容器,并补充回归测试。
+  - 已确认三级叠加仍按 `system → base → user` 覆盖,`can_use` 保持 TODO/架构 §6.1 指定逻辑,工具执行错误仍以 error `tool_result` 返回给 Claude,不破坏会话流程。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
+  - 当前环境缺少 `DINGTALK_APP_KEY`、`DINGTALK_APP_SECRET`、`DINGTALK_ROBOT_CODE`、`ANTHROPIC_API_KEY`、`OAUTH_REDIRECT_URI`,且未配置文档父级与群 `channel_enabled`,因此未执行真实钉钉建文档端到端外部验证;具备凭据、文档权限、`dingtalk.document` 父级配置和群能力开关后可用 `python -m src.main --stream` 进行人工复验。
 
 ---
 
