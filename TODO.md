@@ -109,11 +109,18 @@
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python -m src.main --help`。
   - 当前环境无真实钉钉 `.env`/Stream 连接凭据,未执行单聊和群聊外部人工发送验证;相关发送路径已由 mock HTTP 测试覆盖,具备凭据和 Stream 配置后可用 `python -m src.main --stream` 验证。
 
-## T08 `[TODO]` 接入 Claude,一问一答
+## [DONE] T08 接入 Claude,一问一答
 - `infra/llm.py`:`LLMClient`,封装 Anthropic SDK;`async complete(system, messages) -> str`;模型从配置读(默认 `claude-sonnet-5`);超时与错误处理。
 - 在 `on_message` 里:`InboundMessage.text` → `LLMClient.complete` → `outbound.reply`。**先无历史、无工具、无 Session**。
 - 系统提示:简短说明"你是企业内 AI 助手"。
 - **验收**:@机器人或私聊,能得到 LLM 回复;群里发送者显示为机器人独立身份(人工确认)。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/infra/llm.py`,实现 `LLMClient.complete(system, messages) -> str`,封装 Anthropic async Messages API,从配置读取模型/API key,设置请求超时,并将 Anthropic 错误包装为 `LLMError` 后记录结构化日志。
+  - 已将 T07 的固定文本回复替换为一问一答 LLM 路径:`InboundMessage.text` 以无历史、无工具、无 Session 的单轮 `user` 消息发送给 Claude,再通过既有 `DingTalkOutbound.reply()` 回到来源会话。
+  - 已设置系统提示 `你是企业内 AI 助手。请简洁、准确地回答用户问题。`;非文本消息仍不进入 LLM,继续回复 `暂只支持文本`。
+  - 已补充 LLM wrapper 与主消息处理单测,并更新 README 的 Stream 行为说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`、`.venv/bin/python -m src.main --help`。
+  - 当前环境无真实钉钉 Stream/Anthropic `.env` 凭据,未执行私聊/@ 机器人外部人工验证;代码路径已由 mock 单测覆盖,具备凭据后可用 `python -m src.main --stream` 验证真实 LLM 回复和机器人独立身份。
 
 ## T09 `[TODO]` 【REVIEW】M1 对话闭环审阅
 - 审阅 T06–T08:Stream 回调是否稳健(异常不断连);归一化字段是否齐全;出站 webhook/OpenAPI 回退逻辑;LLM 调用错误处理。

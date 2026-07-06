@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from src.infra.log import configure_logging, get_logger
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from src.infra.config import AppConfig
 
 logger = get_logger("im_assistant")
-DEFAULT_TRIGGER_REPLY = "收到"
+ASSISTANT_SYSTEM_PROMPT = "你是企业内 AI 助手。请简洁、准确地回答用户问题。"
 
 
 class ReplySender(Protocol):
@@ -22,6 +22,13 @@ class ReplySender(Protocol):
 
     async def reply(self, inbound: InboundEvent, text: str) -> object:
         """Send a reply to the source conversation for an inbound event."""
+
+
+class TextCompleter(Protocol):
+    """Protocol for objects that can complete one assistant text turn."""
+
+    async def complete(self, system: str, messages: Sequence[Mapping[str, str]]) -> str:
+        """Return a text completion for the supplied system prompt and chat messages."""
 
 
 async def main(*, start_stream: bool = False, config: AppConfig | None = None) -> None:
@@ -35,6 +42,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
 
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
+    from src.infra.llm import LLMClient
 
     app_config = config or load_config()
     configure_logging(app_config.logging.level, force=True)
@@ -42,14 +50,20 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
 
     async with DingTalkClient(app_config.dingtalk) as dingtalk_client:
         async with DingTalkOutbound(dingtalk_client) as outbound:
+            async with LLMClient(app_config.llm) as llm_client:
 
-            async def on_event(event: InboundEvent) -> None:
-                await handle_inbound_event(event, outbound=outbound)
+                async def on_event(event: InboundEvent) -> None:
+                    await handle_inbound_event(event, outbound=outbound, llm_client=llm_client)
 
-            await DingTalkStreamAdapter(app_config.dingtalk, on_event).start()
+                await DingTalkStreamAdapter(app_config.dingtalk, on_event).start()
 
 
-async def handle_inbound_event(event: InboundEvent, *, outbound: ReplySender) -> None:
+async def handle_inbound_event(
+    event: InboundEvent,
+    *,
+    outbound: ReplySender,
+    llm_client: TextCompleter,
+) -> None:
     """Apply trigger rules and route a normalized DingTalk inbound event."""
 
     from src.adapters.dingtalk import (
@@ -73,14 +87,23 @@ async def handle_inbound_event(event: InboundEvent, *, outbound: ReplySender) ->
         await outbound.reply(event, UNSUPPORTED_MESSAGE_REPLY)
         return
 
-    await _on_inbound_message(event, outbound=outbound)
+    await _on_inbound_message(event, outbound=outbound, llm_client=llm_client)
 
 
-async def _on_inbound_message(message: InboundMessage, *, outbound: ReplySender) -> None:
-    """Reply with fixed text until the LLM flow is added in the next task."""
+async def _on_inbound_message(
+    message: InboundMessage,
+    *,
+    outbound: ReplySender,
+    llm_client: TextCompleter,
+) -> None:
+    """Complete one stateless LLM turn and reply to the DingTalk conversation."""
 
     logger.debug("dingtalk_inbound_message_accepted", extra={"msg_id": message.msg_id})
-    await outbound.reply(message, DEFAULT_TRIGGER_REPLY)
+    reply_text = await llm_client.complete(
+        ASSISTANT_SYSTEM_PROMPT,
+        [{"role": "user", "content": message.text}],
+    )
+    await outbound.reply(message, reply_text)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
