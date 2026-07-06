@@ -43,9 +43,11 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
     from src.infra.llm import LLMClient
+    from src.infra.store import initialize_database
 
     app_config = config or load_config()
     configure_logging(app_config.logging.level, force=True)
+    await initialize_database(app_config.storage.database_path)
     from src.adapters.dingtalk import DingTalkOutbound, DingTalkStreamAdapter
 
     async with DingTalkClient(app_config.dingtalk) as dingtalk_client:

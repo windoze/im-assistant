@@ -136,10 +136,16 @@
 
 # M2 — 会话运行时
 
-## T10 `[TODO]` SQLite 存储层
+## [DONE] T10 SQLite 存储层
 - `infra/store.py`:用 `aiosqlite`;建表 `sessions`、`messages`(会话历史)、`identity_bindings`、`audit_log`、`token_vault`(后续里程碑用);提供异步 CRUD 封装。
 - 迁移/建表在启动时幂等执行。
 - **验收**:单测覆盖建表 + 基本读写。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/infra/store.py`,基于 `aiosqlite` 实现 `SQLiteStore`、幂等 schema 初始化和 `sessions`、`messages`、`identity_bindings`、`audit_log`、`token_vault` 五张表。
+  - 已提供会话、消息历史、身份绑定、审计日志和 token vault 的异步读写/更新/删除封装,并用 JSON 字段保留后续 Session/能力/OBO 扩展所需的灵活元数据。
+  - 已新增 `storage.database_path` 非密钥配置,并在 Stream 启动路径中执行数据库初始化;README 已补充 SQLite 初始化说明。
+  - 已补充单测覆盖建表幂等性和五张表的基本 CRUD 行为。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest`、`python -m src.main`。
 
 ## T11 `[TODO]` Session 抽象与路由
 - `core/session.py`:`Session` dataclass(架构 §5:`kind(dm|group)`、`bot`、`principal`、`actor`、`context`(历史)、`state`(Idle/RunningAgent/AwaitingInteraction)、`lifecycle`)。

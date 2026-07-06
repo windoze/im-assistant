@@ -26,6 +26,8 @@ llm:
   model: claude-opus-test
 session:
   confirm_timeout_sec: 42
+storage:
+  database_path: state/assistant.db
 dingtalk:
   api_base: https://api.example.com/
   legacy_api_base: https://oapi.example.com/
@@ -49,6 +51,7 @@ logging:
     assert config.llm.model == "claude-opus-test"
     assert config.llm.anthropic_api_key == "anthropic-key"
     assert config.session.confirm_timeout_sec == 42
+    assert config.storage.database_path == tmp_path / "state" / "assistant.db"
     assert config.logging.level == "DEBUG"
     assert config.oauth.redirect_uri == "https://example.com/oauth/callback"
 

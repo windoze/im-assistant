@@ -14,7 +14,7 @@ DingTalk OpenAPI calls, Claude responses, SQLite state, and encrypted user token
 
 3. Copy `.env.example` to `.env` and fill in the DingTalk and Anthropic values.
 4. Adjust non-secret settings such as the Claude model, DingTalk API base URL, session timeout,
-   and log level in `config.yaml` when needed.
+   SQLite database path, and log level in `config.yaml` when needed.
 
 ## Usage
 
@@ -35,6 +35,10 @@ When a user privately messages the bot or @mentions it in a group, the service s
 Claude with a short enterprise-assistant system prompt and replies through `sessionWebhook` when it
 is still valid, otherwise through DingTalk OpenAPI. This M1 path is intentionally stateless: no
 history, tools, or Session runtime are used yet. Non-text messages receive `暂只支持文本`.
+
+On Stream startup the service idempotently initializes the SQLite database configured by
+`storage.database_path` with tables for sessions, message history, identity bindings, audit logs,
+and encrypted token material.
 
 Run tests:
 

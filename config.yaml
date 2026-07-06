@@ -4,6 +4,9 @@ llm:
 session:
   confirm_timeout_sec: 1800
 
+storage:
+  database_path: im_assistant.db
+
 dingtalk:
   api_base: https://api.dingtalk.com
   legacy_api_base: https://oapi.dingtalk.com

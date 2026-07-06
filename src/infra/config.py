@@ -55,6 +55,13 @@ class SessionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class StorageConfig:
+    """SQLite storage settings."""
+
+    database_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class LoggingConfig:
     """Structured logging settings."""
 
@@ -75,6 +82,7 @@ class AppConfig:
     dingtalk: DingTalkConfig
     llm: LLMConfig
     session: SessionConfig
+    storage: StorageConfig
     logging: LoggingConfig
     oauth: OAuthConfig
 
@@ -99,6 +107,7 @@ def load_config(
     dingtalk_section = _section(raw_config, "dingtalk")
     llm_section = _section(raw_config, "llm")
     session_section = _section(raw_config, "session")
+    storage_section = _section(raw_config, "storage")
     logging_section = _section(raw_config, "logging")
 
     return AppConfig(
@@ -119,6 +128,14 @@ def load_config(
         ),
         session=SessionConfig(
             confirm_timeout_sec=_positive_int(session_section, "confirm_timeout_sec", 1800),
+        ),
+        storage=StorageConfig(
+            database_path=_path_value(
+                storage_section,
+                "database_path",
+                "im_assistant.db",
+                base_dir=config_file.parent,
+            ),
         ),
         logging=LoggingConfig(
             level=_non_empty_string(logging_section, "level", "INFO").upper(),
@@ -183,6 +200,14 @@ def _non_empty_string(section: Mapping[str, Any], key: str, default: str) -> str
 
 def _url_string(section: Mapping[str, Any], key: str, default: str) -> str:
     return _non_empty_string(section, key, default).rstrip("/")
+
+
+def _path_value(section: Mapping[str, Any], key: str, default: str, *, base_dir: Path) -> Path:
+    value = _non_empty_string(section, key, default)
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return path
 
 
 def _positive_int(section: Mapping[str, Any], key: str, default: int) -> int:
