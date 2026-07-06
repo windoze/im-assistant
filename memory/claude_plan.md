@@ -1,19 +1,23 @@
-## Execution plan
+# Execution Plan
 
-I will follow `TODO.md` as the source of truth and complete only the first task whose heading is not prefixed with `[DONE]`.
+I will follow `TODO.md` as the authoritative source and complete exactly the first task whose heading is not prefixed with `[DONE]`. This file records the actionable plan and progress updates for the current invocation.
 
-1. Read `TODO.md` to identify the first incomplete task and its validation requirements.
-2. Check the latest commit message for any unfinished issue directly relevant to that task, without doing broad historical triage.
-3. Inspect only the files needed for the selected task, then implement the task completely or add the minimum prerequisite task if a concrete blocker makes the selected task impossible.
-4. Run formatting, linting, and relevant/full validation required by the task and repository conventions, addressing any unscheduled failures.
-5. Update this file at key milestones, update `TODO.md` with the `[DONE]` prefix and completion record if the task is completed, and update `PLAN.md` only if phase-level planning changes.
-6. Commit the resulting changes with a descriptive message including the required co-author trailer, then stop.
+## Steps
+
+1. Read `TODO.md` and identify the first incomplete task.
+2. Check the latest commit message only for unfinished work directly relevant to that task.
+3. Inspect the relevant files and existing tests for the selected task.
+4. Implement the task completely, adding or updating tests and documentation when directly required.
+5. Run formatting, linting, and relevant/full tests according to the repository’s validation requirements.
+6. Update `TODO.md` by prefixing the task heading with `[DONE]` and filling its completion record.
+7. Commit all task-related changes, including this progress file.
+8. Stop without starting the next task.
 
 ## Progress
 
-- Selected task: `T20` TokenVault (user-level token encrypted storage) is the first incomplete task in `TODO.md`.
-- Latest commit: `[T19] Review M3 capability layer`; it does not mention an unfinished issue that changes the T20 scope.
-- Implemented: added `src/infra/token_vault.py`, wired `TOKEN_VAULT_FERNET_KEY` through config, and documented key generation.
-- Validated: formatting, linting, full pytest suite, and `python -m src.main` passed.
-- Completed: marked `T20` as `[DONE]` in `TODO.md` with the completion record.
-- Next: review the diff and commit the task changes.
+- Initialized plan before executing repository commands.
+- Identified first incomplete task: `T21 钉钉 OAuth2 端点与 code 换 token`.
+- Latest commit is `[T20] Implement encrypted TokenVault`, which directly precedes T21 and does not add an unfinished blocker.
+- Planned implementation: add `src/infra/oauth.py` with `PendingAuthStore`, DingTalk authorization URL construction, `/oauth/start` and `/oauth/callback` aiohttp handlers, and code-to-user-token exchange; add targeted tests and documentation/config updates.
+- Implemented the OAuth module, added aiohttp as a runtime dependency, documented the endpoint contract, and installed the updated editable package.
+- Fixed validation issues from the first full test run; formatting, linting, pytest, and the application entry point now pass.

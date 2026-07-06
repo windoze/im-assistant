@@ -266,12 +266,19 @@
   - 已补充单测覆盖存/取/撤销、密文不可读、scope 归一化、即将过期需刷新标记和配置加载。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T21 `[TODO]` 钉钉 OAuth2 端点与 code 换 token
+## [DONE] T21 钉钉 OAuth2 端点与 code 换 token
 - `infra/oauth.py` + 一个轻量 HTTP 服务(`aiohttp`/`fastapi`,原型可临时域名/隧道):
   - `/oauth/start?nonce=`:查 pending,构造 `https://login.dingtalk.com/oauth2/auth?...client_id=APP_KEY&response_type=code&scope=openid&state=nonce&redirect_uri=...&prompt=consent`,302 跳转。
   - `/oauth/callback?code=&state=`:校验 state(单次、短时效)→ `POST /v1.0/oauth2/userAccessToken`(`clientId`/`clientSecret`/`code`/`grantType=authorization_code`)→ 得 `accessToken`+`refreshToken`+`expireIn`。
 - `PendingAuthStore`:`nonce → {principal, session, service, scopes, exp}`,单次使用。
 - **验收**:走完浏览器授权能拿到 userAccessToken+refreshToken(手动验证一次)。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/infra/oauth.py`,实现 `PendingAuthStore`、短时效单次 nonce、钉钉授权 URL 构造、`/oauth/start` aiohttp 302 跳转和 `/oauth/callback` state 校验/消费。
+  - 已实现授权码换用户 token:`POST /v1.0/oauth2/userAccessToken`,请求体使用 `clientId` / `clientSecret` / `code` / `grantType=authorization_code`,并校验返回的 `accessToken`、`refreshToken`、`expireIn`。
+  - 已提供 `OAuthCallbackResult` 完成回调,供后续 T22 身份核对和 TokenVault 落库接入;README 已补充 OAuth endpoint 使用方式和公网 HTTPS/隧道要求。
+  - 已新增单测覆盖 pending nonce 创建/去重/过期/单次消费、start 重定向参数、callback code 换 token、state 重放拒绝、过期 state 不换 token 和异常 token 响应。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
+  - 当前环境缺少真实钉钉 OAuth 登录回调公网 HTTPS/隧道和可用 `.env` 凭据,未执行外部浏览器人工授权;具备 `OAUTH_REDIRECT_URI` 公网回调、应用 OAuth 登录配置和凭据后可通过 `PendingAuthStore` 预置 nonce 后访问 `/oauth/start?nonce=...` 进行人工验收。
 
 ## T22 `[TODO]` 身份核对与 TokenVault 落库
 - 回调拿到 user token 后:调 `GET /v1.0/contact/users/me`(带用户 token)取 `unionId`;核对 == pending 里记录的 actor 身份(架构 §7.2),不符则拒绝并作废 nonce。
