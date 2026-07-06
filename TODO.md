@@ -180,10 +180,14 @@
   - 已补充单测覆盖多轮历史进入 prompt、历史落库、最近历史截断、运行中状态持久化、`AwaitingInteraction` 预留路径和主处理链路调用 agent loop;README 已更新多轮上下文与状态说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T14 `[TODO]` 【REVIEW】M2 会话运行时审阅
+## [DONE] T14 【REVIEW】M2 会话运行时审阅
 - 审阅 T10–T13:Session 路由是否正确(群共享/actor 更新);串行 inbox 是否真串行、不同会话真并行;历史加载是否有上限/截断策略;状态机流转是否清晰。
 - 并发压力小验证:多会话并发不串味。
 - 跑 `ruff`+`pytest`;输出问题清单并修复。
+- **完成记录(2026-07-07)**:
+  - 已审阅 T10–T13 的 SQLite 存储、Session 路由、per-session inbox、AgentLoop 多轮历史与状态流转、主入口 Stream→inbox→router→agent loop→outbound 链路。
+  - 问题清单:未发现需要修改生产代码的缺陷;发现 T14 要求的"多会话并发不串味"小压力验证缺少直接覆盖,已新增 `tests/test_m2_runtime.py`,并发驱动两个会话经过 inbox、SessionManager、AgentLoop、SQLite 历史和 outbound,断言历史不串味且两个会话可同时处于 `RunningAgent`。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`。
 
 ---
 
