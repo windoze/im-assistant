@@ -21,13 +21,16 @@
 
 # M0 — 环境与骨架
 
-## T01 `[TODO]` 初始化项目骨架与依赖
+## [DONE] T01 初始化项目骨架与依赖
 - 建目录结构(PLAN.md §3):`src/{adapters/dingtalk,core,capabilities/{system,base,user},infra}`、`tests/`,每个包加 `__init__.py`。
 - `pyproject.toml`:依赖 `dingtalk-stream`、`anthropic`、`httpx`、`pyyaml`、`python-dotenv`、`cryptography`、`aiosqlite`;dev 依赖 `pytest`、`pytest-asyncio`、`ruff`。
 - `src/main.py`:空的 asyncio 入口(`async def main()` + `asyncio.run`),打印启动日志。
 - `.env.example`:列出 `DINGTALK_APP_KEY` `DINGTALK_APP_SECRET` `DINGTALK_ROBOT_CODE` `ANTHROPIC_API_KEY` `OAUTH_REDIRECT_URI` 占位。
 - `.gitignore`:`.env`、`*.db`、`__pycache__`、`.venv`。
 - **验收**:`python -m src.main` 能启动并打印日志;`pytest` 能跑(即使 0 用例)。
+- **完成记录(2026-07-07)**:
+  - 已创建 PLAN.md §3 要求的 Python 包目录、`__init__.py`、`src/main.py` 异步入口、依赖元数据、环境变量示例、忽略规则、README 和最小 smoke test。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`python -m src.main`、`.venv/bin/pytest`。
 
 ## T02 `[TODO]` 配置加载与日志基础设施
 - `infra/config.py`:`load_config()` 合并 `.env`(dotenv)+ `config.yaml`,返回带类型的配置对象(dataclass);缺必填项报清晰错误。
