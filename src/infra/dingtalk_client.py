@@ -618,11 +618,14 @@ def _invalid_user_access_token_response(*, method: str, path: str) -> DingTalkAP
 
 
 def _is_refresh_token_rejected(error: DingTalkAPIError) -> bool:
-    if error.status_code in (400, 401, 403):
+    details = f"{error.errcode or ''} {error.errmsg or ''}".lower()
+    if "invalid_grant" in details:
         return True
 
-    details = f"{error.errcode or ''} {error.errmsg or ''}".lower()
-    return "refresh" in details and any(
+    if "refresh" not in details:
+        return False
+
+    return any(
         marker in details
         for marker in (
             "invalid",

@@ -220,6 +220,27 @@ async def test_refresh_user_access_token_rejects_invalid_refresh_token() -> None
 
 
 @pytest.mark.asyncio
+async def test_refresh_user_access_token_does_not_revoke_on_unrelated_oauth_error() -> None:
+    """Only refresh-token-specific OAuth errors should be treated as revocable grants."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"code": "forbidden_app", "message": "application is forbidden"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        with pytest.raises(DingTalkAPIError) as exc_info:
+            await client.refresh_user_access_token("old-refresh-token")
+
+    assert not isinstance(exc_info.value, DingTalkUserTokenRefreshRejected)
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.errcode == "forbidden_app"
+
+
+@pytest.mark.asyncio
 async def test_send_oto_posts_robot_text_message() -> None:
     paths: list[str] = []
 

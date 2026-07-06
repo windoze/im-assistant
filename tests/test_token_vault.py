@@ -16,6 +16,10 @@ class RefreshRejected(RuntimeError):
     """Test exception representing an invalid provider refresh token."""
 
 
+class TransientRefreshError(RuntimeError):
+    """Test exception representing a non-revocable refresh failure."""
+
+
 @dataclass(frozen=True, slots=True)
 class RefreshPayload:
     """Provider refresh result shape consumed by TokenVault.get_valid."""
@@ -175,6 +179,43 @@ async def test_token_vault_get_valid_revokes_rejected_refresh_token(tmp_path) ->
         assert resolution.needs_reauthorization is True
         assert resolution.reauthorization_reason == "refresh_rejected"
         assert await vault.get("principal-1", "calendar") is None
+
+
+@pytest.mark.asyncio
+async def test_token_vault_get_valid_preserves_token_on_unrelated_refresh_error(tmp_path) -> None:
+    """Refresh failures that are not explicit rejection signals must not revoke grants."""
+
+    fernet_key = Fernet.generate_key().decode("utf-8")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+    async def refresh(_: str) -> RefreshPayload:
+        raise TransientRefreshError("oauth service unavailable")
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        vault = TokenVault(store, fernet_key=fernet_key, now_factory=lambda: now)
+        await vault.put(
+            principal="principal-1",
+            service="calendar",
+            user_access_token="old-access",
+            refresh_token="refresh-token",
+            scopes=("calendar:read",),
+            expires_at=datetime(2026, 1, 1, 11, 59, tzinfo=UTC),
+        )
+
+        with pytest.raises(TransientRefreshError):
+            await vault.get_valid(
+                "principal-1",
+                "calendar",
+                refresh=refresh,
+                refresh_rejected_exceptions=(RefreshRejected,),
+            )
+
+        stored = await vault.get("principal-1", "calendar")
+
+    assert stored is not None
+    assert stored.user_access_token == "old-access"
+    assert stored.refresh_token == "refresh-token"
 
 
 @pytest.mark.asyncio

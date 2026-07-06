@@ -12,6 +12,10 @@ I will follow `TODO.md` as the source of truth and complete only the first task 
 
 ## Progress
 
+- 2026-07-07 invocation started. I will re-read `TODO.md` as the authoritative task source, identify the first heading not prefixed with `[DONE]`, and then either complete exactly that task or add/commit the minimum prerequisite if a concrete blocker prevents completion.
+- Selected task: T26 `【REVIEW】M4 OBO 审阅`. I will review the T20-T25 OBO implementation, fix any concrete defects found, run the required formatter/linter/tests, mark T26 `[DONE]`, and commit only this invocation's changes.
+- T26 review finding: refresh-token rejection classification treated any 400/401/403 OAuth refresh error as a revoked user grant. I narrowed rejection detection to explicit refresh-token/invalid-grant signals and added DingTalk client plus TokenVault regressions so unrelated refresh failures keep stored OBO grants.
+- Validation passed and T26 is marked `[DONE]` in `TODO.md`; next step is final status inspection and commit.
 - Selected task: T25 `OBO 工具:今日日程总结(招牌 case)`.
 - Latest commit checked: no unfinished issue relevant to T25 was indicated.
 - Next: inspect existing capability, credential, DingTalk client, and LLM patterns; then add the schedule-summary capability, tests, docs, TODO completion record, and commit.

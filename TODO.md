@@ -327,10 +327,16 @@
   - 已验证:`.venv/bin/ruff check . --fix`、`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
   - 当前环境缺少真实钉钉 OAuth 回调公网地址、`.env` 凭据和日历权限,未执行外部私聊首次授权/二次免授权人工验收;相关路径已由 Authorizer/TokenVault/AgentLoop/mock DingTalk calendar API 单测覆盖,具备凭据与权限后可用 `python -m src.main --stream` 复验。
 
-## T26 `[TODO]` 【REVIEW】M4 OBO 审阅
+## [DONE] T26 【REVIEW】M4 OBO 审阅
 - 审阅 T20–T25:OAuth 流程 state/nonce 防护;**身份核对是否真能挡住冒名授权**(重点安全项);TokenVault 加密与撤销;三态逻辑;静默刷新;`me` 接口是否真按本人权限。
 - 端到端:日程总结 case 完整跑通(含首次授权 + 二次免授权)。
 - 跑 `ruff`+`pytest`;输出问题清单并修复。
+- **完成记录(2026-07-07)**:
+  - 已审阅 T20–T25 的 OAuth pending nonce/state 单次消费与过期处理、`contact/users/me` 身份核对、TokenVault Fernet 加密/撤销、Authorizer 三态、静默刷新和 `schedule_summary` 使用用户 token 访问 `/users/me/...` 的链路。
+  - 问题清单:发现静默刷新把任意 400/401/403 OAuth 刷新错误都归类为 refresh token 失效,可能在应用级配置/权限错误等非用户授权失效场景下误删 TokenVault 授权。已收窄为仅 `invalid_grant` 或明确包含 refresh-token 失效语义的错误才触发撤销。
+  - 已补充回归测试覆盖:无关 OAuth refresh 错误保持为 `DingTalkAPIError` 而非 `DingTalkUserTokenRefreshRejected`;TokenVault 对非显式拒绝的刷新异常不删除既有加密授权。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_dingtalk_client.py tests/test_token_vault.py tests/test_oauth.py tests/test_authorizer.py tests/test_agent_loop.py tests/test_system_capabilities.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
+  - 当前环境缺少真实钉钉 OAuth 回调公网地址、`.env` 凭据和日历权限,未执行外部首次授权/二次免授权端到端人工验收;相关安全和 OBO 行为已由 mock DingTalk OAuth、`contact/users/me`、TokenVault、Authorizer、AgentLoop 与 calendar API 回归测试覆盖。
 
 ---
 
