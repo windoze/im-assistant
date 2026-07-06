@@ -11,4 +11,4 @@ I cannot record private chain-of-thought, but this file captures the complete ac
 7. Update this progress file at key milestones.
 8. Commit all changes for this invocation with a descriptive message and the required co-author trailer, then stop.
 
-Status: T04 code, tests, README, and `TODO.md` completion record are updated; next step is checking the final diff/status and committing this invocation's changes.
+Status: T04 completed and committed; this invocation should stop without starting T05.
