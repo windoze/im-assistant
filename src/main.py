@@ -210,6 +210,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
     from src.capabilities import Authorizer, load_capability_registry
     from src.core import (
         AgentLoop,
+        CommandRegistry,
         InteractionCallbackRouter,
         SessionInboxDispatcher,
         SessionManager,
@@ -278,6 +279,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         confirm_timeout_seconds=app_config.session.confirm_timeout_sec,
                     )
                     callback_router = InteractionCallbackRouter(agent_loop)
+                    command_registry = CommandRegistry(store)
                     timeout_scheduler = InteractionTimeoutScheduler(agent_loop, outbound)
                     await schedule_persisted_interaction_timeouts(store, timeout_scheduler)
 
@@ -287,6 +289,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                             outbound=outbound,
                             session_manager=session_manager,
                             agent_loop=agent_loop,
+                            command_handler=command_registry,
                             interaction_timeout_scheduler=timeout_scheduler,
                         )
 

@@ -98,8 +98,11 @@ tool result in SQLite history without asking Claude to narrate the cancellation 
 
 Before any text message enters the agent loop, `src.core.router.classify_inbound_message(...)`
 deterministically checks for an active pending interaction, then slash-command text beginning with `/`,
-and only sends ordinary messages to Claude. The command registry is implemented in later M6 tasks; until
-it is wired, slash commands receive a direct system reply instead of reaching the LLM.
+and only sends ordinary messages to Claude. Slash commands are dispatched through the independent
+`src.core.commands.CommandRegistry`, which checks command availability, actor role requirements, and
+argument specs before calling a deterministic handler. Commands can affect later AI turns only by calling
+the command injection API, which appends explicit command-originated history to the Session; concrete
+built-in commands are added by the next M6 task.
 
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and

@@ -1,15 +1,19 @@
-Execution plan:
-1. Read TODO.md to identify the first task whose heading is not prefixed with [DONE].
-2. Inspect only the files and task context needed for that selected task, including recent git state if relevant.
-3. Implement the selected task completely, adding or updating tests and documentation required by the task.
-4. Run formatting, linting, and the relevant/full validation required by TODO.md.
-5. Update TODO.md completion status and completion record for exactly that task; update PLAN.md only if phase-level sequencing changes.
-6. Commit all task-related changes with a descriptive message and stop without starting the next task.
+Execution plan for current invocation:
+1. Confirm the first incomplete TODO task and inspect the latest commit for a directly relevant unfinished issue before broad triage.
+2. For T32, inspect the existing router, session, capability, identity, store, config, and tests needed to add a command registry without disturbing the AI tool registry.
+3. Implement `core/commands.py` with a `Command` model, role-aware command registry, deterministic actor authorization, and an `inject_message(session, text)` API that appends command-originated context through the existing session/message storage path.
+4. Wire the command registry into the existing slash-command branch so unavailable commands, mode restrictions, argument parsing failures, and authorization failures produce deterministic system replies and never enter the LLM.
+5. Add or update focused tests covering registry listing, tool-table separation, role authorization denial, slash-command execution, and injected messages being visible to the next agent turn.
+6. Update README only if the new command registry behavior needs user-facing documentation; update TODO.md by prefixing T32 with `[DONE]` and adding a completion record after validation.
+7. Run formatting, linting, targeted tests, the full test suite, and `python -m src.main`; fix any unscheduled failures before marking the task done.
+8. Commit all task-related changes with a descriptive T32 commit message and stop.
 
 Progress log:
-- Created this plan before project inspection.
-- Selected first incomplete task: T31 `[TODO]` 入站三岔口分类器.
-- Current scope: add a deterministic pre-agent router that classifies inbound messages into pending-interaction resolution, slash-command handling, or the existing agent loop, with tests for all three branches.
-- Implemented the classifier in `src/core/router.py`, wired it into `handle_inbound_event`, and added unit/integration coverage for pending-priority, slash-command, and agent-loop branches.
-- Validation passed: ruff format/check, targeted router/main tests, full pytest suite, and `python -m src.main`.
-- Marked T31 complete in TODO.md with the completion record.
+- Read TODO.md and selected first incomplete task: T32 `[TODO]` 指令注册表与鉴权.
+- Wrote this execution plan before running shell commands or editing project implementation files.
+- Confirmed latest commit is the completed T31 classifier and does not call out a relevant unfinished issue.
+- Baseline validation passed before implementation: `ruff format --check`, `ruff check`, and full `pytest`.
+- Implemented `src/core/commands.py` with `Command`, `CommandArgsSpec`, `CommandRegistry`, actor-role authorization, direct command dispatch, and SQLite-backed command history injection.
+- Exported command primitives through `src.core`, wired an empty `CommandRegistry` into the Stream runtime, updated README, and added focused tests for listing, authorization, argument parsing, mode restrictions, and injection visibility.
+- Full validation passed after implementation: `ruff format`, `ruff check`, full `pytest`, and `python -m src.main`.
+- Marked T32 `[DONE]` in TODO.md with completion details. No PLAN.md phase-level sequencing changes were needed.

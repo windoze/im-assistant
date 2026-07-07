@@ -402,11 +402,18 @@
   - 已补充 `tests/test_router.py` 和主入口集成单测,覆盖 pending 优先级、斜杠指令分支、未配置命令处理器、普通消息进入 agent loop 和非文本消息保留既有 unsupported 路径;README 已说明当前三岔口行为。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_router.py tests/test_main.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T32 `[TODO]` 指令注册表与鉴权
+## [DONE] T32 指令注册表与鉴权
 - `core/commands.py`:`Command`(架构 §8.5:`name`、`available_in`、`requires_role(user|channel_admin|org_admin)`、`args_spec`、`handler`);注册表**独立于 AI 工具表**。
 - `requires_role` 用 actor 鉴权(架构 §3);越权拒绝。
 - 注入消息 API:`inject_message(session, text)` —— 指令影响会话的唯一途径(架构 §8.5)。
 - **验收**:注册表可列出;越权指令被拒;注入 API 能让后续 agent 轮看到。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/core/commands.py`,实现独立于 AI capability/tool 表的 `Command`、`CommandArgsSpec`、`CommandRegistry`、命令上下文和确定性 slash-command dispatch。
+  - 已实现基于当前 `Session.actor` 的 `requires_role` 鉴权,默认从 Session context 的 `channel_admin_ids`、`org_admin_ids` 或 `actor_roles` 判定角色,并支持 `org_admin` 覆盖 `channel_admin`。
+  - 已提供命令影响 AI 会话的唯一注入入口:`CommandRegistry.inject_message(session, text)` 与 handler 内 `CommandContext.inject_message(text)`,以 `command_injection` 元数据追加到 SQLite 消息历史,后续 agent 轮可见。
+  - 已将空 `CommandRegistry` 接入 Stream 运行时,保留 T31 的未配置 handler fallback;README 已更新 M6 指令注册表说明。
+  - 已补充单测覆盖注册表列出、与 capability registry 分离、参数解析、会话模式限制、越权拒绝、管理员授权通过和注入消息进入后续 AgentLoop 历史。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T33 `[TODO]` 首批指令
 - 实现:`/help`(列可用能力/指令)、`/reset`(清会话上下文)、`/whoami`(查身份绑定/授权状态)、`/connect <service>`(主动触发 OBO 预热授权)、`/disconnect <service>`(清 TokenVault)、`/cancel`(主动取消当前 pending 确认)。
