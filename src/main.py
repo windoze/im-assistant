@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         InteractionCancellationResult,
         PendingInteractionInfo,
     )
+    from src.core.router import CommandMessageHandler
     from src.core.session import Session
     from src.core.session_manager import SessionRouteResult
     from src.infra.config import AppConfig
@@ -312,6 +313,7 @@ async def handle_inbound_event(
     llm_client: TextCompleter | None = None,
     session_manager: SessionRouter | None = None,
     agent_loop: AgentRunner | None = None,
+    command_handler: CommandMessageHandler | None = None,
     interaction_timeout_scheduler: InteractionTimeoutScheduler | None = None,
 ) -> None:
     """Apply trigger rules and route a normalized DingTalk inbound event."""
@@ -347,16 +349,26 @@ async def handle_inbound_event(
         )
         if session_route.should_send_welcome:
             await outbound.reply(event, GROUP_WELCOME_REPLY)
-        if session.state == "AwaitingInteraction" and agent_loop is not None:
-            cancellation = await agent_loop.cancel_pending_interaction_for_session(
-                session,
-                reason="superseded_by_new_message",
-                actor_id=event.sender_staff_id,
-                provider_message_id=event.msg_id,
+
+    from src.core import classify_inbound_message
+
+    route = classify_inbound_message(event, session=session)
+    if route.kind == "pending_interaction":
+        if session is None or agent_loop is None:
+            raise ValueError("pending interaction routing requires a Session and agent_loop")
+        cancellation = await agent_loop.cancel_pending_interaction_for_session(
+            session,
+            reason="superseded_by_new_message",
+            actor_id=event.sender_staff_id,
+            provider_message_id=event.msg_id,
+        )
+        if cancellation is None:
+            raise ValueError(
+                f"Session has no cancellable pending interaction: {session.session_id}"
             )
-            if cancellation is not None:
-                await outbound.reply(event, cancellation.notice_text)
-                session = cancellation.session
+        await outbound.reply(event, cancellation.notice_text)
+        session = cancellation.session
+        route = classify_inbound_message(event, session=session)
 
     if isinstance(event, UnsupportedInboundMessage):
         logger.info(
@@ -364,6 +376,16 @@ async def handle_inbound_event(
             extra={"msg_id": event.msg_id, "message_type": event.message_type},
         )
         await outbound.reply(event, UNSUPPORTED_MESSAGE_REPLY)
+        return
+
+    if route.kind == "command":
+        await _handle_command_message(
+            event,
+            outbound=outbound,
+            session=session,
+            command_text=route.command_text,
+            command_handler=command_handler,
+        )
         return
 
     await _on_inbound_message(
@@ -374,6 +396,36 @@ async def handle_inbound_event(
         agent_loop=agent_loop,
         interaction_timeout_scheduler=interaction_timeout_scheduler,
     )
+
+
+async def _handle_command_message(
+    message: InboundMessage,
+    *,
+    outbound: ReplySender,
+    session: Session | None,
+    command_text: str | None,
+    command_handler: CommandMessageHandler | None,
+) -> None:
+    """Route a slash command to deterministic command handling, never to Claude."""
+
+    from src.core import COMMANDS_NOT_CONFIGURED_REPLY
+
+    normalized_command = _required_string(command_text, "command_text")
+    logger.info(
+        "dingtalk_command_message",
+        extra={
+            "msg_id": message.msg_id,
+            "session_id": None if session is None else session.session_id,
+            "command": normalized_command.split(maxsplit=1)[0],
+        },
+    )
+    if command_handler is None:
+        await outbound.reply(message, COMMANDS_NOT_CONFIGURED_REPLY)
+        return
+
+    reply_text = await command_handler.handle_command(session, normalized_command, message)
+    if isinstance(reply_text, str) and reply_text.strip() != "":
+        await outbound.reply(message, reply_text)
 
 
 async def _on_inbound_message(

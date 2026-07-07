@@ -393,9 +393,14 @@
 
 # M6 — 指令通道(slash command)
 
-## T31 `[TODO]` 入站三岔口分类器
+## [DONE] T31 入站三岔口分类器
 - `core/router.py`:入 agent loop 前的确定性分类器(架构 §8.4):① 命中 pending interaction → resolve ② `/` 开头(群聊需先 @ 命中)→ 指令处理器 ③ 其余 → agent loop。
 - **验收**:三类消息分别走对分支;单测覆盖分类逻辑。
+- **完成记录(2026-07-07)**:
+  - 已在 `src/core/router.py` 增加 `classify_inbound_message(...)`、`InboundMessageRoute` 和命令处理协议,按 `pending_interaction → command → agent_loop` 顺序做确定性分类,斜杠指令不会进入 Claude。
+  - 已将 `handle_inbound_event(...)` 接入分类器:AwaitingInteraction 消息优先走 pending 取消/恢复路径,恢复后同一条新消息再按指令或 agent loop 继续处理;未配置 M6 指令注册表时,斜杠指令直接收到系统回复而不进入 LLM。
+  - 已补充 `tests/test_router.py` 和主入口集成单测,覆盖 pending 优先级、斜杠指令分支、未配置命令处理器、普通消息进入 agent loop 和非文本消息保留既有 unsupported 路径;README 已说明当前三岔口行为。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_router.py tests/test_main.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T32 `[TODO]` 指令注册表与鉴权
 - `core/commands.py`:`Command`(架构 §8.5:`name`、`available_in`、`requires_role(user|channel_admin|org_admin)`、`args_spec`、`handler`);注册表**独立于 AI 工具表**。

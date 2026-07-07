@@ -11,6 +11,7 @@ import pytest
 
 from src.adapters.dingtalk import InboundEvent, InboundMessage, UnsupportedInboundMessage
 from src.core import (
+    COMMANDS_NOT_CONFIGURED_REPLY,
     GROUP_WELCOME_REPLY,
     Actor,
     AgentRunResult,
@@ -134,6 +135,58 @@ async def test_handle_inbound_event_uses_agent_loop_for_routed_text_message() ->
 
 
 @pytest.mark.asyncio
+async def test_handle_inbound_event_routes_slash_command_to_handler() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(text=" /help")
+    routed_session = _session()
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=routed_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("unused")
+    command_handler = FakeCommandHandler("command reply")
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+        command_handler=command_handler,
+    )
+
+    assert command_handler.calls == [(routed_session, "/help", event)]
+    assert agent_loop.calls == []
+    assert outbound.replies == [(event, "command reply")]
+
+
+@pytest.mark.asyncio
+async def test_handle_inbound_event_keeps_unconfigured_slash_command_out_of_llm() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(text="/help")
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=_session(),
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("unused")
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+    )
+
+    assert agent_loop.calls == []
+    assert outbound.replies == [(event, COMMANDS_NOT_CONFIGURED_REPLY)]
+
+
+@pytest.mark.asyncio
 async def test_handle_inbound_event_cancels_pending_interaction_before_new_message() -> None:
     outbound = FakeOutbound()
     event = _text_event(text="新的问题", msg_id="msg-2")
@@ -169,6 +222,48 @@ async def test_handle_inbound_event_cancels_pending_interaction_before_new_messa
     assert outbound.replies == [
         (event, "已取消:未确认，[发送钉钉通知] 未执行。"),
         (event, "新消息回复"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pending_interaction_route_has_priority_over_slash_command() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(text="/help", msg_id="msg-2")
+    awaiting_session = _session(state="AwaitingInteraction")
+    restored_session = _session(state="Idle")
+    cancellation = InteractionCancellationResult(
+        correlation_id="confirm-1",
+        kind="confirm",
+        reason="superseded_by_new_message",
+        notice_text="已取消:未确认，[发送钉钉通知] 未执行。",
+        session=restored_session,
+    )
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=awaiting_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("unused", cancellation_result=cancellation)
+    command_handler = FakeCommandHandler("command reply")
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+        command_handler=command_handler,
+    )
+
+    assert agent_loop.cancellations == [
+        (awaiting_session, "superseded_by_new_message", "user-1", "msg-2")
+    ]
+    assert command_handler.calls == [(restored_session, "/help", event)]
+    assert agent_loop.calls == []
+    assert outbound.replies == [
+        (event, "已取消:未确认，[发送钉钉通知] 未执行。"),
+        (event, "command reply"),
     ]
 
 
@@ -395,6 +490,23 @@ class FakeAgentLoop:
     ) -> InteractionCancellationResult | None:
         self.cancellations_by_id.append((correlation_id, reason, actor_id, provider_message_id))
         return self._cancellation_result
+
+
+class FakeCommandHandler:
+    calls: list[tuple[Session | None, str, object]]
+
+    def __init__(self, reply: str | None) -> None:
+        self._reply = reply
+        self.calls = []
+
+    async def handle_command(
+        self,
+        session: Session | None,
+        command_text: str,
+        event: object,
+    ) -> str | None:
+        self.calls.append((session, command_text, event))
+        return self._reply
 
 
 class FakeSessionManager:

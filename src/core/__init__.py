@@ -26,7 +26,17 @@ from src.core.interrupt import (
     SessionInterruptNotFound,
     SessionInterruptResponderMismatch,
 )
-from src.core.router import CardCallback, ConfirmCallbackResolver, InteractionCallbackRouter
+from src.core.router import (
+    COMMANDS_NOT_CONFIGURED_REPLY,
+    CardCallback,
+    CommandMessageHandler,
+    ConfirmCallbackResolver,
+    InboundMessageRoute,
+    InboundMessageRouteKind,
+    InteractionCallbackRouter,
+    TextInboundEvent,
+    classify_inbound_message,
+)
 from src.core.session import Actor, BotIdentity, Principal, Session
 from src.core.session_manager import GROUP_WELCOME_REPLY, SessionManager, SessionRouteResult
 
@@ -39,14 +49,18 @@ __all__ = [
     "AgentLoopToolError",
     "AgentRunResult",
     "BotIdentity",
+    "COMMANDS_NOT_CONFIGURED_REPLY",
     "CapabilityAuthorizer",
     "CapabilityExecutionContext",
     "CapabilityServiceError",
     "ConfirmCallbackResult",
     "CardCallback",
+    "CommandMessageHandler",
     "ConfirmCallbackResolver",
     "GROUP_WELCOME_REPLY",
     "InboxEvent",
+    "InboundMessageRoute",
+    "InboundMessageRouteKind",
     "InteractionCallbackRouter",
     "InteractionCancellationReason",
     "InteractionCancellationResult",
@@ -63,6 +77,8 @@ __all__ = [
     "SessionInterruptNotFound",
     "SessionInterruptResponderMismatch",
     "SessionManager",
+    "TextInboundEvent",
     "SessionRouteResult",
     "ToolExecutor",
+    "classify_inbound_message",
 ]

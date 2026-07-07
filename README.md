@@ -96,6 +96,11 @@ their persisted `expires_at`, and Stream startup restores those timers from SQLi
 interactions still expire; timeout sends the system notice directly and records a silent `Cancelled`
 tool result in SQLite history without asking Claude to narrate the cancellation again.
 
+Before any text message enters the agent loop, `src.core.router.classify_inbound_message(...)`
+deterministically checks for an active pending interaction, then slash-command text beginning with `/`,
+and only sends ordinary messages to Claude. The command registry is implemented in later M6 tasks; until
+it is wired, slash commands receive a direct system reply instead of reaching the LLM.
+
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and
 `src/capabilities/user/<userId>/` in that order, so later tiers override earlier capabilities with

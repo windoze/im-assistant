@@ -1,29 +1,15 @@
-# Execution Plan
+Execution plan:
+1. Read TODO.md to identify the first task whose heading is not prefixed with [DONE].
+2. Inspect only the files and task context needed for that selected task, including recent git state if relevant.
+3. Implement the selected task completely, adding or updating tests and documentation required by the task.
+4. Run formatting, linting, and the relevant/full validation required by TODO.md.
+5. Update TODO.md completion status and completion record for exactly that task; update PLAN.md only if phase-level sequencing changes.
+6. Commit all task-related changes with a descriptive message and stop without starting the next task.
 
-I identified the first incomplete task in `TODO.md` as **T30 `[TODO]` 【REVIEW】M5 带外交互审阅**. This file records the actionable plan and progress updates; it intentionally contains a concise execution plan rather than private chain-of-thought.
-
-## Current task
-
-Review and validate M5 T27-T29:
-
-- `correlation_id` must be unpredictable and card callbacks must validate responder identity.
-- Confirm/consent interrupt creation, persistence, resolution, cancellation, and timeout behavior must be unified.
-- Runtime system cancellation notices must be separate from AI replies, and cancellation completion must stay silent.
-- Pending interaction records must be persisted and recoverable enough for the documented runtime behavior.
-- End-to-end-style tests should cover confirm, timeout cancellation, and new-message cancellation paths.
-
-## Step-by-step plan
-
-1. Inspect the latest commit message for directly relevant unfinished M5/T30 notes.
-2. Read M5 implementation surfaces: interrupt primitives, agent loop confirm/consent and cancellation paths, main inbound routing/timeout scheduling, DingTalk card callback normalization, outbound client methods, persistence schema, and existing M5 tests.
-3. Compare the implementation against T30 review criteria and architecture §8.4/§8.4b.
-4. Fix any high-confidence defects found during the review; if no production defect is found, add missing regression coverage required by T30.
-5. Run formatting, linting, focused M5 tests, and full pytest in the required order.
-6. Update `TODO.md` by marking T30 `[DONE]` and adding the completion record with the review findings and validation.
-7. Commit all changes for T30 with the required co-author trailer, then stop.
-
-## Progress
-
-- 2026-07-07 08:22: Identified T30 as the first incomplete task and updated this execution plan.
-- 2026-07-07 08:27: Review found a T30-relevant recovery gap: pending interactions are persisted, but timeout cancellation tasks are only scheduled for interactions created in the current process. I will add persisted-pending listing, synthesize OpenAPI reply targets from stored Sessions, schedule recovered timeouts on Stream startup, and add regression coverage.
-- 2026-07-07 08:29: Implemented recovered timeout scheduling, added focused tests, updated README/TODO, and completed formatting, linting, focused tests, full pytest, and startup smoke validation.
+Progress log:
+- Created this plan before project inspection.
+- Selected first incomplete task: T31 `[TODO]` 入站三岔口分类器.
+- Current scope: add a deterministic pre-agent router that classifies inbound messages into pending-interaction resolution, slash-command handling, or the existing agent loop, with tests for all three branches.
+- Implemented the classifier in `src/core/router.py`, wired it into `handle_inbound_event`, and added unit/integration coverage for pending-priority, slash-command, and agent-loop branches.
+- Validation passed: ruff format/check, targeted router/main tests, full pytest suite, and `python -m src.main`.
+- Marked T31 complete in TODO.md with the completion record.
