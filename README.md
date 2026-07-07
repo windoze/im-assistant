@@ -159,6 +159,12 @@ one DM-only calendar tool that uses OBO authorization:
 | `send_notification` | Send a DingTalk notification after an explicit confirm-card approval. | Marked `sensitivity="high"`, so runtime confirmation is mandatory before sending. For group use, add `send_notification` to `capabilities.channel_enabled.<openConversationId>`. |
 | `schedule_summary` | Summarize the current DM actor's DingTalk calendar for today. | Marked `sensitivity="high"` and requires `calendar:read` OBO consent; after authorization and confirmation it reads `/v1.0/calendar/primary` and `/v1.0/calendar/users/me/calendars/<calendarId>/events` with the user token, then asks Claude to summarize the events. |
 
+The project currently does not expose a capability that executes arbitrary code or user-provided
+scripts. No subprocess/container sandbox is active for the built-in DingTalk API tools. If such a
+capability is added later, it must first run in an isolated subprocess or container with restricted
+filesystem access plus per-Session workdir, context, and credential views before being exposed to
+Claude.
+
 Run tests:
 
 ```bash
