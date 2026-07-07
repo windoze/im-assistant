@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import inspect
 import shlex
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from src.core.session import Actor, Session
+from src.infra.audit import AuditLogger, CommandAuditOutcome
 from src.infra.store import MessageRecord, MessageRole
 
 CommandAvailability = Literal["dm", "group"]
@@ -167,9 +168,11 @@ class CommandRegistry:
         commands: Iterable[Command] | None = None,
         *,
         role_authorizer: CommandRoleAuthorizer | None = None,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._store = store
         self._role_authorizer = role_authorizer or ContextCommandRoleAuthorizer()
+        self._audit_logger = audit_logger
         self._commands: dict[str, Command] = {}
         for command in commands or ():
             self.register(command)
@@ -233,12 +236,45 @@ class CommandRegistry:
         name, args_text = _parse_command_text(command_text)
         command = self.get(name)
         if command is None:
+            await self._record_command_audit(
+                session,
+                name,
+                args=(),
+                args_text=args_text,
+                command=None,
+                outcome="unknown_command",
+            )
             return UNKNOWN_COMMAND_REPLY.format(name=name)
         if session is None:
+            await self._record_command_audit(
+                session,
+                name,
+                args=(),
+                args_text=args_text,
+                command=command,
+                outcome="missing_session",
+            )
             return COMMAND_REQUIRES_SESSION_REPLY
         if session.kind not in command.available_in:
+            await self._record_command_audit(
+                session,
+                name,
+                args=(),
+                args_text=args_text,
+                command=command,
+                outcome="unavailable",
+            )
             return COMMAND_UNAVAILABLE_REPLY.format(name=command.name)
         if not self._actor_has_required_role(session, command.requires_role):
+            await self._record_command_audit(
+                session,
+                name,
+                args=(),
+                args_text=args_text,
+                command=command,
+                outcome="forbidden",
+                reason=f"requires_role:{command.requires_role}",
+            )
             return COMMAND_FORBIDDEN_REPLY.format(
                 name=command.name,
                 role=command.requires_role,
@@ -247,6 +283,15 @@ class CommandRegistry:
         try:
             args = command.args_spec.parse(args_text)
         except CommandParseError as exc:
+            await self._record_command_audit(
+                session,
+                name,
+                args=(),
+                args_text=args_text,
+                command=command,
+                outcome="invalid_args",
+                reason=str(exc),
+            )
             return COMMAND_ARGS_INVALID_REPLY.format(reason=str(exc))
 
         context = CommandContext(
@@ -258,17 +303,64 @@ class CommandRegistry:
             registry=self,
             _store=self._store,
         )
-        result = command.handler(context)
-        if inspect.isawaitable(result):
-            result = await result
-        if result is not None and not isinstance(result, str):
-            raise CommandExecutionError("Command handler must return str or None")
+        try:
+            result = command.handler(context)
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not None and not isinstance(result, str):
+                raise CommandExecutionError("Command handler must return str or None")
+        except Exception as exc:
+            await self._record_command_audit(
+                session,
+                name,
+                args=args,
+                args_text=args_text,
+                command=command,
+                outcome="failed",
+                reason=str(exc) or type(exc).__name__,
+            )
+            raise
+        await self._record_command_audit(
+            session,
+            name,
+            args=args,
+            args_text=args_text,
+            command=command,
+            outcome="executed",
+        )
         return result
 
     def _actor_has_required_role(self, session: Session, required_role: CommandRole) -> bool:
         roles = self._role_authorizer.roles_for_actor(session, session.actor)
         required_level = _ROLE_LEVELS[required_role]
         return any(_ROLE_LEVELS[role] >= required_level for role in roles)
+
+    async def _record_command_audit(
+        self,
+        session: Session | None,
+        command_name: str,
+        *,
+        args: Sequence[str],
+        args_text: str,
+        command: Command | None,
+        outcome: CommandAuditOutcome,
+        reason: str | None = None,
+    ) -> None:
+        if self._audit_logger is None:
+            return
+        await self._audit_logger.record_command_execution(
+            actor_id=None if session is None else session.actor.id,
+            principal_id=None if session is None else session.principal.id,
+            session_id=None if session is None else session.session_id,
+            command_name=command_name,
+            args=args,
+            args_text=args_text,
+            session_kind=None if session is None else session.kind,
+            requires_role=None if command is None else command.requires_role,
+            available_in=() if command is None else tuple(command.available_in),
+            outcome=outcome,
+            reason=reason,
+        )
 
 
 async def inject_message(

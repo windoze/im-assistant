@@ -25,6 +25,7 @@ from src.core.agent_loop import (
 )
 from src.core.commands import Command, CommandArgsSpec, CommandContext, CommandRegistry
 from src.core.session import Session
+from src.infra.audit import AuditLogger
 from src.infra.store import (
     IdentityBindingRecord,
     MessageRecord,
@@ -188,6 +189,7 @@ def create_builtin_command_registry(
     interrupt_manager: BuiltinCommandInterruptManager | None = None,
     interaction_canceller: BuiltinCommandInteractionCanceller | None = None,
     timeout_scheduler: BuiltinCommandTimeoutScheduler | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> CommandRegistry:
     """Create a command registry populated with all built-in slash commands."""
 
@@ -201,7 +203,7 @@ def create_builtin_command_registry(
         interaction_canceller=interaction_canceller,
         timeout_scheduler=timeout_scheduler,
     )
-    registry = CommandRegistry(store)
+    registry = CommandRegistry(store, audit_logger=audit_logger)
     for command in builtin_commands(services):
         registry.register(command)
     return registry

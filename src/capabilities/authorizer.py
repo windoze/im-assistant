@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlparse, urlunparse
 from src.capabilities.base import Requirement
 from src.capabilities.credential import CredentialHandle
 from src.capabilities.registry import CapabilityMode
+from src.infra.audit import AuditLogger, OBOAuditDecision
 from src.infra.config import OAuthConfig
 from src.infra.dingtalk_client import DingTalkUserTokenRefreshRejected
 from src.infra.oauth import PendingAuth, PendingAuthStore
@@ -91,6 +92,7 @@ class Authorizer:
         oauth_config: OAuthConfig,
         actor_identity_resolver: ActorIdentityResolver | None = None,
         nonce_factory: NonceFactory = lambda: secrets.token_urlsafe(24),
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._token_vault = token_vault
         self._pending_store = pending_store
@@ -98,6 +100,7 @@ class Authorizer:
         self._oauth_config = oauth_config
         self._actor_identity_resolver = actor_identity_resolver
         self._nonce_factory = nonce_factory
+        self._audit_logger = audit_logger
 
     async def resolve(
         self,
@@ -128,9 +131,29 @@ class Authorizer:
                 )
             )
         if requirement.on_behalf_of != "actor":
-            return Denied(f"unsupported on_behalf_of target: {requirement.on_behalf_of}")
+            reason = f"unsupported on_behalf_of target: {requirement.on_behalf_of}"
+            await self._record_obo_decision(
+                actor_id=actor_id,
+                principal_id=principal,
+                session_id=session,
+                requirement=requirement,
+                mode=mode,
+                decision="denied",
+                reason=reason,
+            )
+            return Denied(reason)
         if mode != "dm":
-            return Denied("OBO requirements can only be granted in DM sessions")
+            reason = "OBO requirements can only be granted in DM sessions"
+            await self._record_obo_decision(
+                actor_id=actor_id,
+                principal_id=principal,
+                session_id=session,
+                requirement=requirement,
+                mode=mode,
+                decision="denied",
+                reason=reason,
+            )
+            return Denied(reason)
 
         resolution = await self._token_vault.get_valid(
             principal,
@@ -142,6 +165,15 @@ class Authorizer:
             resolution.token.scopes,
             requirement.scopes,
         ):
+            await self._record_obo_decision(
+                actor_id=actor_id,
+                principal_id=principal,
+                session_id=session,
+                requirement=requirement,
+                mode=mode,
+                decision="granted",
+                refreshed=resolution.refreshed,
+            )
             return Granted(
                 _handle_from_user_token(
                     resolution.token,
@@ -165,6 +197,17 @@ class Authorizer:
             service=requirement.service,
             scopes=requirement.scopes,
         )
+        await self._record_obo_decision(
+            actor_id=actor_id,
+            principal_id=principal,
+            session_id=session,
+            requirement=requirement,
+            mode=mode,
+            decision="needs_consent",
+            reason=reason,
+            pending_nonce=pending.nonce,
+            actor_identity=actor_identity,
+        )
         return NeedsConsent(
             url=build_oauth_start_url(self._oauth_config, pending),
             pending=pending,
@@ -178,6 +221,37 @@ class Authorizer:
         if inspect.isawaitable(result):
             result = await result
         return _non_empty_string(result, "actor_identity")
+
+    async def _record_obo_decision(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        session_id: str,
+        requirement: Requirement,
+        mode: CapabilityMode,
+        decision: OBOAuditDecision,
+        reason: str | None = None,
+        refreshed: bool = False,
+        pending_nonce: str | None = None,
+        actor_identity: str | None = None,
+    ) -> None:
+        if self._audit_logger is None:
+            return
+        await self._audit_logger.record_obo_authorization(
+            actor_id=actor_id,
+            principal_id=principal_id,
+            session_id=session_id,
+            service=requirement.service,
+            scopes=requirement.scopes,
+            mode=mode,
+            decision=decision,
+            on_behalf_of=requirement.on_behalf_of,
+            reason=reason,
+            refreshed=refreshed,
+            pending_nonce=pending_nonce,
+            actor_identity=actor_identity,
+        )
 
 
 def build_oauth_start_url(oauth_config: OAuthConfig, pending: PendingAuth) -> str:

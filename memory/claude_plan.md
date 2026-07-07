@@ -14,37 +14,37 @@ I will follow `TODO.md` as the authoritative source of work and complete exactly
 
 ## Current Status
 
-Selected first incomplete task: `T34 [TODO] 【REVIEW】M6 指令通道审阅`.
+Selected first incomplete task: `T35 审计日志` (now marked `[DONE]` in `TODO.md`).
 
-## T34 Review Scope
+## T35 Scope
 
-1. Review T31-T33 implementation for deterministic routing priority: pending interaction, slash command, then agent loop.
-2. Verify the command registry remains independent from AI capabilities/tools.
-3. Verify command authorization uses the current actor/session roles correctly.
-4. Verify `/connect` and `/disconnect` stay consistent with TokenVault and OBO consent state.
-5. Verify `inject_message` is the only command mechanism that mutates AI-visible conversation history.
-6. Run formatting, linting, and tests; fix any concrete issue found during the review.
-7. Mark T34 `[DONE]`, update its completion record, and commit the completed review task.
+1. Inspect the existing SQLite `audit_log` schema and helper methods.
+2. Add `infra/audit.py` with a typed audit logger that writes who/representing-whom/when/scope/action metadata to `audit_log`.
+3. Wire audit records into:
+   - OBO authorization/token use in `Authorizer`.
+   - Interrupt decisions for confirm/cancel/timeout/new-message cancellation.
+   - Slash command dispatch and builtin command side effects.
+4. Add tests proving OBO reads, confirm/cancel decisions, and command execution all leave queryable audit records.
+5. Run formatting, linting, and tests in the repository’s established order.
+6. Mark T35 `[DONE]`, update its completion record, and commit all task changes.
 
-## Review Findings
+## Current Progress
 
-1. Group messages using the documented `@助手 /command` syntax were not recognized by the command classifier because it only accepted text whose stripped body started with `/`.
-2. Pending `/cancel` handling used separate direct parsing, so the same group mention syntax would be treated as a generic new-message cancellation instead of the explicit cancel command.
-3. Command parsing split command names only on literal spaces, so tab/newline-separated command arguments could raise instead of being parsed deterministically.
+Implemented the T35 audit layer and initial wiring:
 
-## Fixes Applied
+1. Added `src/infra/audit.py` with typed audit helpers for OBO authorization, interaction decisions, and command dispatch.
+2. Wired `Authorizer` to audit OBO grant / needs-consent / denial decisions without storing token material.
+3. Wired `SessionInterruptManager` to audit terminal confirm/consent resolve and cancel decisions.
+4. Wired `CommandRegistry` and the built-in registry factory to audit deterministic command outcomes.
+5. Wired Stream startup to share one `AuditLogger` across Authorizer, interrupt manager, and command registry.
+6. Added integration tests in `tests/test_audit.py` and documented the audit contract in `README.md`.
 
-1. Added shared command extraction that accepts DM `/command` and group leading-mention `/command` syntax.
-2. Reused shared extraction for pending `/cancel` detection.
-3. Updated command parsing to split on arbitrary whitespace.
-4. Added regression tests and updated README command-routing documentation.
-
-## Validation Completed
+Validation completed:
 
 1. `.venv/bin/ruff format .`
 2. `.venv/bin/ruff check .`
-3. `.venv/bin/pytest tests/test_router.py tests/test_commands.py tests/test_main.py tests/test_builtin_commands.py -q`
+3. `.venv/bin/pytest tests/test_audit.py tests/test_authorizer.py tests/test_interrupt.py tests/test_commands.py tests/test_builtin_commands.py -q`
 4. `.venv/bin/pytest -q`
 5. `python -m src.main`
 
-`TODO.md` has been updated to mark T34 `[DONE]` with a completion record.
+`TODO.md` has been updated to mark T35 `[DONE]` with the completion record. Next: commit all task changes.

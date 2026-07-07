@@ -441,10 +441,17 @@
 
 # M7 — 加固(可试运行)
 
-## T35 `[TODO]` 审计日志
+## [DONE] T35 审计日志
 - `infra/audit.py`:记录 OBO 取数、confirm/取消决议、指令执行(谁/代表谁/何时/何 scope/做了什么),写 `audit_log` 表(架构 §9)。
 - 在 Authorizer、interrupt resolve、command handler 三处埋点。
 - **验收**:上述操作都留下可查审计记录。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/infra/audit.py`,提供 typed `AuditLogger`,统一写入 SQLite `audit_log` 表,覆盖 OBO 授权决议、confirm/consent 终态决议和 slash-command 分发结果。
+  - 已在 `Authorizer` 埋点记录 OBO granted / needs_consent / denied,包含 actor、principal、session、service、scopes、mode、reason/refreshed 等元数据,不记录用户 token 明文。
+  - 已在 `SessionInterruptManager.resolve()` / `cancel()` 埋点记录 confirm/consent resolved/cancelled,包含 correlation_id、responder、action/service/scope、reason 和规范化 resolution。
+  - 已在 `CommandRegistry.handle_command()` 埋点记录指令执行、未知指令、缺会话、不可用、越权、参数错误和 handler 失败等确定性结果;Stream 启动路径已向 Authorizer、interrupt manager 和内置指令注册表注入同一个 `AuditLogger`。
+  - 已补充 `tests/test_audit.py` 覆盖 OBO 授权、confirm resolve/cancel 和指令执行三类可查询审计记录;README 已补充运行时审计契约。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_audit.py tests/test_authorizer.py tests/test_interrupt.py tests/test_commands.py tests/test_builtin_commands.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T36 `[TODO]` 错误恢复与鲁棒性
 - Stream 断线自动重连(指数退避);消息按 `msg_id` 去重(幂等);access_token 失效重取;出站发消息限流(防刷屏)。

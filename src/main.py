@@ -216,6 +216,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
         SessionManager,
         create_builtin_command_registry,
     )
+    from src.infra.audit import AuditLogger
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
     from src.infra.llm import LLMClient
@@ -228,6 +229,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
 
     async with SQLiteStore(app_config.storage.database_path) as store:
         await store.initialize()
+        audit_logger = AuditLogger(store)
         session_manager = SessionManager(store, bot_id=app_config.dingtalk.robot_code)
         token_vault = TokenVault.from_config(store, app_config.token_vault)
         pending_auth_store = PendingAuthStore()
@@ -253,11 +255,12 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                 dingtalk_client=dingtalk_client,
                 oauth_config=app_config.oauth,
                 actor_identity_resolver=actor_union_id,
+                audit_logger=audit_logger,
             )
 
             async with DingTalkOutbound(dingtalk_client) as outbound:
                 async with LLMClient(app_config.llm) as llm_client:
-                    interrupt_manager = SessionInterruptManager(store)
+                    interrupt_manager = SessionInterruptManager(store, audit_logger=audit_logger)
                     agent_loop = AgentLoop(
                         store,
                         llm_client,
@@ -294,6 +297,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         interrupt_manager=interrupt_manager,
                         interaction_canceller=agent_loop,
                         timeout_scheduler=timeout_scheduler,
+                        audit_logger=audit_logger,
                     )
                     await schedule_persisted_interaction_timeouts(store, timeout_scheduler)
 

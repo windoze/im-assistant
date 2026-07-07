@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
 from src.core.session import Session, SessionState
+from src.infra.audit import AuditLogger
 from src.infra.store import PendingInteractionRecord, SessionRecord
 
 InterruptKind = Literal["confirm", "consent"]
@@ -194,9 +195,11 @@ class SessionInterruptManager:
         store: SessionInterruptPersistence,
         *,
         now_factory: Callable[[], datetime] = lambda: datetime.now(UTC),
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._store = store
         self._now_factory = now_factory
+        self._audit_logger = audit_logger
 
     async def create(
         self,
@@ -293,6 +296,11 @@ class SessionInterruptManager:
                 context=_context_without_interrupt(session_record.context),
             )
         )
+        await self._record_interaction_decision(
+            session_record,
+            record,
+            resolution,
+        )
         return resolution
 
     async def cancel(
@@ -337,7 +345,32 @@ class SessionInterruptManager:
                 context=_context_without_interrupt(session_record.context),
             )
         )
+        await self._record_interaction_decision(
+            session_record,
+            record,
+            resolution,
+        )
         return resolution
+
+    async def _record_interaction_decision(
+        self,
+        session: SessionRecord,
+        pending: PendingInteractionRecord,
+        resolution: InterruptResolution,
+    ) -> None:
+        if self._audit_logger is None:
+            return
+        await self._audit_logger.record_interaction_decision(
+            correlation_id=pending.correlation_id,
+            kind=pending.kind,
+            status=resolution.status,
+            responder_id=resolution.responder,
+            principal_id=session.principal_id,
+            session_id=session.session_id,
+            payload=pending.payload,
+            resolution_payload=resolution.payload,
+            reason=resolution.reason,
+        )
 
 
 def _interrupt_from_record(record: PendingInteractionRecord) -> SessionInterrupt:

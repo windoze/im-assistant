@@ -52,6 +52,12 @@ On Stream startup the service idempotently initializes the SQLite database confi
 `storage.database_path` with tables for sessions, message history, identity bindings, audit logs,
 pending interactions, and encrypted token material.
 
+`src.infra.audit.AuditLogger` writes append-only records to `audit_log` for security-relevant
+decisions: OBO authorization grants/consent/denials, confirm or consent resolutions/cancellations,
+and deterministic slash-command dispatch. Each record includes the DingTalk actor, represented
+principal, Session, scope or service, action, timestamp, and JSON metadata without storing token
+material.
+
 `src.infra.token_vault.TokenVault` stores DingTalk user-level OBO access and refresh tokens in the
 `token_vault` table encrypted with the `.env` Fernet key, and marks grants that are expired or within
 five minutes of expiry as needing refresh. `TokenVault.get_valid(...)` can silently refresh those
