@@ -23,7 +23,7 @@ from src.capabilities import (
     Requirement,
     can_use,
 )
-from src.core.interrupt import InterruptResolution, SessionInterruptManager
+from src.core.interrupt import InterruptResolution, SessionInterrupt, SessionInterruptManager
 from src.core.session import Actor, BotIdentity, Principal, Session, SessionState
 from src.infra.log import get_logger
 from src.infra.store import (
@@ -39,6 +39,7 @@ logger = get_logger(__name__)
 DEFAULT_HISTORY_LIMIT = 20
 DEFAULT_MAX_TOOL_ITERATIONS = 8
 AgentRunStatus = Literal["completed", "awaiting_interaction"]
+InteractionCancellationReason = Literal["superseded_by_new_message", "timeout"]
 
 
 class AgentLoopStateError(RuntimeError):
@@ -95,6 +96,27 @@ class AgentRunResult:
 
     reply_text: str
     status: AgentRunStatus = "completed"
+    pending_interaction: PendingInteractionInfo | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingInteractionInfo:
+    """Public metadata for an interaction that suspended an agent turn."""
+
+    correlation_id: str
+    kind: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionCancellationResult:
+    """Runtime cancellation result for a superseded or timed-out interaction."""
+
+    correlation_id: str
+    kind: str
+    reason: InteractionCancellationReason
+    notice_text: str
+    session: Session
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,7 +437,11 @@ class AgentLoop:
                         "scopes": list(exc.consent.pending.scopes),
                     },
                 )
-                return AgentRunResult(reply_text=reply_text, status="awaiting_interaction")
+                return AgentRunResult(
+                    reply_text=reply_text,
+                    status="awaiting_interaction",
+                    pending_interaction=_pending_interaction_info(interrupt),
+                )
             except AgentLoopConfirmRequired as exc:
                 interrupt = await self._interrupt_manager.create(
                     session,
@@ -454,7 +480,11 @@ class AgentLoop:
                         "correlation_id": exc.correlation_id,
                     },
                 )
-                return AgentRunResult(reply_text=reply_text, status="awaiting_interaction")
+                return AgentRunResult(
+                    reply_text=reply_text,
+                    status="awaiting_interaction",
+                    pending_interaction=_pending_interaction_info(interrupt),
+                )
             await self._persist_completed_turn(
                 session,
                 user_text=normalized_text,
@@ -484,6 +514,100 @@ class AgentLoop:
             correlation_id,
             reply,
             responder=responder,
+        )
+
+    async def cancel_pending_interaction_for_session(
+        self,
+        session: Session,
+        *,
+        reason: InteractionCancellationReason,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> InteractionCancellationResult | None:
+        """Cancel the active pending interaction for a Session without invoking the LLM."""
+
+        pending = await self._store.get_pending_interaction_for_session(session.session_id)
+        if pending is None:
+            return None
+        return await self._cancel_pending_interaction_record(
+            pending,
+            reason=reason,
+            actor_id=actor_id,
+            provider_message_id=provider_message_id,
+        )
+
+    async def cancel_pending_interaction(
+        self,
+        correlation_id: str,
+        *,
+        reason: InteractionCancellationReason,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> InteractionCancellationResult | None:
+        """Cancel one pending interaction by correlation id without invoking the LLM."""
+
+        pending = await self._store.get_pending_interaction(correlation_id)
+        if pending is None or pending.status != "pending":
+            return None
+        return await self._cancel_pending_interaction_record(
+            pending,
+            reason=reason,
+            actor_id=actor_id,
+            provider_message_id=provider_message_id,
+        )
+
+    async def _cancel_pending_interaction_record(
+        self,
+        pending: PendingInteractionRecord,
+        *,
+        reason: InteractionCancellationReason,
+        actor_id: str | None,
+        provider_message_id: str | None,
+    ) -> InteractionCancellationResult | None:
+        """Cancel a loaded pending interaction and persist the silent closeout."""
+
+        effective_reason = _effective_cancellation_reason(
+            pending,
+            reason,
+            now=_to_utc(self._now_factory()),
+        )
+        if effective_reason == "timeout" and _to_utc(self._now_factory()) < _to_utc(
+            pending.expires_at
+        ):
+            return None
+
+        responder = actor_id or _runtime_responder(effective_reason, pending)
+        resolution_payload = _cancellation_resolution_payload(
+            effective_reason,
+            actor_id=actor_id,
+            provider_message_id=provider_message_id,
+        )
+        await self._interrupt_manager.cancel(
+            pending.correlation_id,
+            effective_reason,
+            resolution_payload,
+            responder=responder,
+            require_responder=False,
+            allow_expired=True,
+        )
+
+        notice_text = _cancellation_notice_text(pending, effective_reason)
+        await self._persist_interaction_cancellation(
+            pending,
+            reason=effective_reason,
+            notice_text=notice_text,
+            actor_id=actor_id,
+            provider_message_id=provider_message_id,
+        )
+        restored_record = await self._store.get_session(pending.session_id)
+        if restored_record is None:
+            raise AgentLoopStateError(f"Cancelled Session no longer exists: {pending.session_id}")
+        return InteractionCancellationResult(
+            correlation_id=pending.correlation_id,
+            kind=pending.kind,
+            reason=effective_reason,
+            notice_text=notice_text,
+            session=_session_from_record(restored_record),
         )
 
     async def resolve_confirm_callback(
@@ -538,6 +662,37 @@ class AgentLoop:
             correlation_id=correlation_id,
             status="confirmed",
             tool_result=tool_result,
+        )
+
+    async def _persist_interaction_cancellation(
+        self,
+        pending: PendingInteractionRecord,
+        *,
+        reason: InteractionCancellationReason,
+        notice_text: str,
+        actor_id: str | None,
+        provider_message_id: str | None,
+    ) -> None:
+        metadata = {
+            "status": "interaction_cancelled",
+            "kind": pending.kind,
+            "correlation_id": pending.correlation_id,
+            "reason": reason,
+        }
+        await self._store.add_message(
+            session_id=pending.session_id,
+            role="system",
+            content=notice_text,
+            actor_id=actor_id,
+            provider_message_id=provider_message_id,
+            metadata={**metadata, "source": "runtime"},
+        )
+        await self._store.add_message(
+            session_id=pending.session_id,
+            role="tool",
+            content=_cancelled_tool_result_text(pending, reason),
+            actor_id=_pending_capability_name(pending),
+            metadata=metadata,
         )
 
     async def _persist_completed_turn(
@@ -1060,6 +1215,118 @@ def _consent_interrupt_payload(exc: AgentLoopConsentRequired) -> dict[str, Any]:
     }
 
 
+def _pending_interaction_info(interrupt: SessionInterrupt) -> PendingInteractionInfo:
+    return PendingInteractionInfo(
+        correlation_id=_non_empty_string(interrupt.correlation_id, "correlation_id"),
+        kind=_non_empty_string(interrupt.kind, "kind"),
+        expires_at=_to_utc(interrupt.expires_at),
+    )
+
+
+def _effective_cancellation_reason(
+    pending: PendingInteractionRecord,
+    requested_reason: InteractionCancellationReason,
+    *,
+    now: datetime,
+) -> InteractionCancellationReason:
+    if requested_reason == "timeout" or _to_utc(now) > _to_utc(pending.expires_at):
+        return "timeout"
+    return requested_reason
+
+
+def _runtime_responder(
+    reason: InteractionCancellationReason,
+    pending: PendingInteractionRecord,
+) -> str:
+    if reason == "timeout":
+        return "runtime:timeout"
+    return pending.responder_id
+
+
+def _cancellation_resolution_payload(
+    reason: InteractionCancellationReason,
+    *,
+    actor_id: str | None,
+    provider_message_id: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"cancelled": True, "reason": reason}
+    if actor_id is not None:
+        payload["actor_id"] = _non_empty_string(actor_id, "actor_id")
+    if provider_message_id is not None:
+        payload["provider_message_id"] = _non_empty_string(
+            provider_message_id,
+            "provider_message_id",
+        )
+    return payload
+
+
+def _cancellation_notice_text(
+    pending: PendingInteractionRecord,
+    reason: InteractionCancellationReason,
+) -> str:
+    if pending.kind == "confirm":
+        action = _pending_action_label(pending)
+        if reason == "timeout":
+            return f"已取消:确认超时，[{action}] 未执行。"
+        return f"已取消:未确认，[{action}] 未执行。"
+    if pending.kind == "consent":
+        service = _pending_service_label(pending)
+        if reason == "timeout":
+            return f"已取消:授权超时，[{service}] 授权未完成。"
+        return f"已取消:未完成授权，[{service}] 授权未完成。"
+    raise AgentLoopStateError(f"Unsupported pending interaction kind: {pending.kind}")
+
+
+def _cancelled_tool_result_text(
+    pending: PendingInteractionRecord,
+    reason: InteractionCancellationReason,
+) -> str:
+    payload: dict[str, Any] = {
+        "status": "Cancelled",
+        "kind": pending.kind,
+        "reason": reason,
+        "correlation_id": pending.correlation_id,
+    }
+    if pending.kind == "confirm":
+        payload["action"] = _pending_action_label(pending)
+        details = pending.payload.get("details")
+        payload["details"] = (
+            _plain_json_object(details, "confirm.details") if isinstance(details, Mapping) else {}
+        )
+    elif pending.kind == "consent":
+        payload["service"] = _pending_service_label(pending)
+        scopes = pending.payload.get("scopes", [])
+        payload["scopes"] = list(scopes) if isinstance(scopes, list) else []
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _pending_action_label(pending: PendingInteractionRecord) -> str:
+    action = pending.payload.get("action")
+    if isinstance(action, str) and action.strip() != "":
+        return action.strip()
+    capability = pending.payload.get("capability")
+    if isinstance(capability, str) and capability.strip() != "":
+        return capability.strip()
+    return "该操作"
+
+
+def _pending_service_label(pending: PendingInteractionRecord) -> str:
+    service = pending.payload.get("service")
+    if isinstance(service, str) and service.strip() != "":
+        return service.strip()
+    capability = pending.payload.get("capability")
+    if isinstance(capability, str) and capability.strip() != "":
+        return capability.strip()
+    return "授权"
+
+
+def _pending_capability_name(pending: PendingInteractionRecord) -> str | None:
+    capability = pending.payload.get("capability")
+    if isinstance(capability, str) and capability.strip() != "":
+        return capability.strip()
+    return None
+
+
 def _confirm_reply_text(confirm: AgentLoopConfirmRequired) -> str:
     return f"请在钉钉确认卡片中确认是否执行：{confirm.action}"
 
@@ -1087,6 +1354,23 @@ def _session_open_conversation_id(session: Session) -> str | None:
     if isinstance(value, str) and value.strip() != "":
         return value.strip()
     return session.conversation_id if session.kind == "dm" else None
+
+
+def _session_from_record(record: SessionRecord) -> Session:
+    actor_id = record.actor_id or record.principal_id.removeprefix("user:")
+    return Session(
+        session_id=record.session_id,
+        conversation_id=record.conversation_id,
+        kind=record.kind,
+        bot=_bot_identity(record.bot_id),
+        principal=_principal(record.kind, record.principal_id),
+        actor=_actor(actor_id),
+        context=record.context,
+        state=record.state,
+        lifecycle=record.lifecycle,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
 
 
 def _bot_identity(bot_id: str) -> BotIdentity:

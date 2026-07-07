@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -14,11 +15,18 @@ from src.core import (
     Actor,
     AgentRunResult,
     BotIdentity,
+    InteractionCancellationResult,
+    PendingInteractionInfo,
     Principal,
     Session,
     SessionRouteResult,
 )
-from src.main import ASSISTANT_SYSTEM_PROMPT, handle_inbound_event, main
+from src.main import (
+    ASSISTANT_SYSTEM_PROMPT,
+    InteractionTimeoutScheduler,
+    handle_inbound_event,
+    main,
+)
 
 
 def test_main_logs_startup(caplog) -> None:
@@ -124,6 +132,79 @@ async def test_handle_inbound_event_uses_agent_loop_for_routed_text_message() ->
 
 
 @pytest.mark.asyncio
+async def test_handle_inbound_event_cancels_pending_interaction_before_new_message() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(text="新的问题", msg_id="msg-2")
+    awaiting_session = _session(state="AwaitingInteraction")
+    restored_session = _session(state="Idle")
+    cancellation = InteractionCancellationResult(
+        correlation_id="confirm-1",
+        kind="confirm",
+        reason="superseded_by_new_message",
+        notice_text="已取消:未确认，[发送钉钉通知] 未执行。",
+        session=restored_session,
+    )
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=awaiting_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("新消息回复", cancellation_result=cancellation)
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+    )
+
+    assert agent_loop.cancellations == [
+        (awaiting_session, "superseded_by_new_message", "user-1", "msg-2")
+    ]
+    assert agent_loop.calls == [(restored_session, "新的问题", "user-1", "msg-2")]
+    assert outbound.replies == [
+        (event, "已取消:未确认，[发送钉钉通知] 未执行。"),
+        (event, "新消息回复"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interaction_timeout_scheduler_sends_system_notice() -> None:
+    outbound = FakeOutbound()
+    event = _text_event()
+    session = _session(state="AwaitingInteraction")
+    cancellation = InteractionCancellationResult(
+        correlation_id="confirm-timeout",
+        kind="confirm",
+        reason="timeout",
+        notice_text="已取消:确认超时，[发送钉钉通知] 未执行。",
+        session=_session(state="Idle"),
+    )
+    agent_loop = FakeAgentLoop("unused", cancellation_result=cancellation)
+    scheduler = InteractionTimeoutScheduler(agent_loop, outbound)
+
+    scheduler.schedule(
+        event,
+        session,
+        PendingInteractionInfo(
+            correlation_id="confirm-timeout",
+            kind="confirm",
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        ),
+    )
+    for _ in range(10):
+        if outbound.replies:
+            break
+        await asyncio.sleep(0)
+    await scheduler.aclose()
+
+    assert agent_loop.cancellations_by_id == [("confirm-timeout", "timeout", None, None)]
+    assert outbound.replies == [(event, "已取消:确认超时，[发送钉钉通知] 未执行。")]
+
+
+@pytest.mark.asyncio
 async def test_handle_inbound_event_replies_to_unsupported_message_type(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -150,19 +231,33 @@ async def test_handle_inbound_event_replies_to_unsupported_message_type(
 
 def _text_event(
     *,
+    text: str = "hello",
+    msg_id: str = "msg-1",
     conversation_type: int = 1,
     conversation_id: str = "conversation-1",
     open_conversation_id: str = "conversation-1",
 ) -> InboundMessage:
     return InboundMessage(
-        text="hello",
+        text=text,
         sender_staff_id="user-1",
         sender_nick="Alice",
         conversation_type=conversation_type,
         conversation_id=conversation_id,
         open_conversation_id=open_conversation_id,
         session_webhook="https://webhook.example.com/session",
-        msg_id="msg-1",
+        msg_id=msg_id,
+    )
+
+
+def _session(*, state: str = "Idle") -> Session:
+    return Session(
+        session_id="dingtalk:dm:conversation-1",
+        conversation_id="conversation-1",
+        kind="dm",
+        bot=BotIdentity(id="robot-code"),
+        principal=Principal(kind="user", id="user:user-1"),
+        actor=Actor(id="user-1", display_name="Alice"),
+        state=state,
     )
 
 
@@ -192,9 +287,17 @@ class FakeLLMClient:
 class FakeAgentLoop:
     calls: list[tuple[Session, str, str | None, str | None]]
 
-    def __init__(self, reply: str) -> None:
+    def __init__(
+        self,
+        reply: str,
+        *,
+        cancellation_result: InteractionCancellationResult | None = None,
+    ) -> None:
         self._reply = reply
+        self._cancellation_result = cancellation_result
         self.calls = []
+        self.cancellations: list[tuple[Session, str, str | None, str | None]] = []
+        self.cancellations_by_id: list[tuple[str, str, str | None, str | None]] = []
 
     async def run(
         self,
@@ -206,6 +309,28 @@ class FakeAgentLoop:
     ) -> AgentRunResult:
         self.calls.append((session, user_text, actor_id, provider_message_id))
         return AgentRunResult(reply_text=self._reply)
+
+    async def cancel_pending_interaction_for_session(
+        self,
+        session: Session,
+        *,
+        reason: str,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> InteractionCancellationResult | None:
+        self.cancellations.append((session, reason, actor_id, provider_message_id))
+        return self._cancellation_result
+
+    async def cancel_pending_interaction(
+        self,
+        correlation_id: str,
+        *,
+        reason: str,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> InteractionCancellationResult | None:
+        self.cancellations_by_id.append((correlation_id, reason, actor_id, provider_message_id))
+        return self._cancellation_result
 
 
 class FakeSessionManager:

@@ -5,13 +5,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from src.infra.log import configure_logging, get_logger
 
 if TYPE_CHECKING:
     from src.adapters.dingtalk import InboundEvent, InboundMessage
-    from src.core.agent_loop import AgentRunResult
+    from src.core.agent_loop import (
+        AgentRunResult,
+        InteractionCancellationReason,
+        InteractionCancellationResult,
+        PendingInteractionInfo,
+    )
     from src.core.session import Session
     from src.core.session_manager import SessionRouteResult
     from src.infra.config import AppConfig
@@ -53,6 +59,92 @@ class AgentRunner(Protocol):
         provider_message_id: str | None = None,
     ) -> AgentRunResult:
         """Run one agent turn for a routed Session."""
+
+    async def cancel_pending_interaction_for_session(
+        self,
+        session: Session,
+        *,
+        reason: InteractionCancellationReason,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> InteractionCancellationResult | None:
+        """Cancel a pending interaction and return the system notice to send."""
+
+    async def cancel_pending_interaction(
+        self,
+        correlation_id: str,
+        *,
+        reason: InteractionCancellationReason,
+        actor_id: str | None = None,
+        provider_message_id: str | None = None,
+    ) -> InteractionCancellationResult | None:
+        """Cancel a pending interaction by correlation id."""
+
+
+class InteractionTimeoutScheduler:
+    """Schedule timeout cancellations for pending Session interactions."""
+
+    def __init__(self, canceller: AgentRunner, outbound: ReplySender) -> None:
+        self._canceller = canceller
+        self._outbound = outbound
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+
+    def schedule(
+        self,
+        event: InboundEvent,
+        session: Session,
+        pending: PendingInteractionInfo | None,
+    ) -> None:
+        """Schedule a timeout notice for a pending interaction."""
+
+        if pending is None:
+            return
+        existing = self._tasks.pop(pending.correlation_id, None)
+        if existing is not None:
+            existing.cancel()
+        delay = max((_to_utc(pending.expires_at) - datetime.now(UTC)).total_seconds(), 0.0)
+        self._tasks[pending.correlation_id] = asyncio.create_task(
+            self._run_timeout(delay, event, session, pending),
+            name=f"interaction-timeout-{pending.correlation_id}",
+        )
+
+    async def aclose(self) -> None:
+        """Cancel all pending timeout tasks."""
+
+        tasks = tuple(self._tasks.values())
+        self._tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_timeout(
+        self,
+        delay: float,
+        event: InboundEvent,
+        session: Session,
+        pending: PendingInteractionInfo,
+    ) -> None:
+        try:
+            await asyncio.sleep(delay)
+            cancellation = await self._canceller.cancel_pending_interaction(
+                pending.correlation_id,
+                reason="timeout",
+            )
+            if cancellation is not None:
+                await self._outbound.reply(event, cancellation.notice_text)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "interaction_timeout_cancellation_failed",
+                extra={
+                    "correlation_id": pending.correlation_id,
+                    "session_id": session.session_id,
+                },
+            )
+        finally:
+            self._tasks.pop(pending.correlation_id, None)
 
 
 async def main(*, start_stream: bool = False, config: AppConfig | None = None) -> None:
@@ -136,6 +228,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         confirm_timeout_seconds=app_config.session.confirm_timeout_sec,
                     )
                     callback_router = InteractionCallbackRouter(agent_loop)
+                    timeout_scheduler = InteractionTimeoutScheduler(agent_loop, outbound)
 
                     async def process_event(event: InboundEvent) -> None:
                         await handle_inbound_event(
@@ -143,6 +236,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                             outbound=outbound,
                             session_manager=session_manager,
                             agent_loop=agent_loop,
+                            interaction_timeout_scheduler=timeout_scheduler,
                         )
 
                     inbox_dispatcher = SessionInboxDispatcher(process_event)
@@ -158,6 +252,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         ).start()
                     finally:
                         await inbox_dispatcher.close()
+                        await timeout_scheduler.aclose()
 
 
 async def handle_inbound_event(
@@ -167,6 +262,7 @@ async def handle_inbound_event(
     llm_client: TextCompleter | None = None,
     session_manager: SessionRouter | None = None,
     agent_loop: AgentRunner | None = None,
+    interaction_timeout_scheduler: InteractionTimeoutScheduler | None = None,
 ) -> None:
     """Apply trigger rules and route a normalized DingTalk inbound event."""
 
@@ -201,6 +297,16 @@ async def handle_inbound_event(
         )
         if session_route.should_send_welcome:
             await outbound.reply(event, GROUP_WELCOME_REPLY)
+        if session.state == "AwaitingInteraction" and agent_loop is not None:
+            cancellation = await agent_loop.cancel_pending_interaction_for_session(
+                session,
+                reason="superseded_by_new_message",
+                actor_id=event.sender_staff_id,
+                provider_message_id=event.msg_id,
+            )
+            if cancellation is not None:
+                await outbound.reply(event, cancellation.notice_text)
+                session = cancellation.session
 
     if isinstance(event, UnsupportedInboundMessage):
         logger.info(
@@ -216,6 +322,7 @@ async def handle_inbound_event(
         llm_client=llm_client,
         session=session,
         agent_loop=agent_loop,
+        interaction_timeout_scheduler=interaction_timeout_scheduler,
     )
 
 
@@ -226,6 +333,7 @@ async def _on_inbound_message(
     llm_client: TextCompleter | None,
     session: Session | None = None,
     agent_loop: AgentRunner | None = None,
+    interaction_timeout_scheduler: InteractionTimeoutScheduler | None = None,
 ) -> None:
     """Complete one LLM turn and reply to the DingTalk conversation."""
 
@@ -245,6 +353,8 @@ async def _on_inbound_message(
             actor_id=message.sender_staff_id,
             provider_message_id=message.msg_id,
         )
+        if result.status == "awaiting_interaction" and interaction_timeout_scheduler is not None:
+            interaction_timeout_scheduler.schedule(message, session, result.pending_interaction)
         reply_text = result.reply_text
     else:
         if llm_client is None:
@@ -272,6 +382,12 @@ def _required_string(value: object, field_name: str) -> str:
     if not isinstance(value, str) or value.strip() == "":
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def cli(argv: Sequence[str] | None = None) -> None:

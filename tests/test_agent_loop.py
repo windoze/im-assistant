@@ -441,6 +441,159 @@ async def test_agent_loop_cancel_confirm_callback_does_not_execute_tool(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_superseding_message_cancels_pending_confirm_silently(
+    tmp_path,
+) -> None:
+    """A new inbound message should cancel pending confirm without another LLM closeout."""
+
+    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    llm_client = ToolCallingCompleter(
+        [
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu-notify",
+                    "name": "send_notification",
+                    "input": {"content": "请大家 3 点开会"},
+                }
+            ]
+        ]
+    )
+    dingtalk_client = FakeNotificationDingTalkClient()
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=CapabilityRegistry([SEND_NOTIFICATION]),
+            capability_services={"dingtalk_client": dingtalk_client},
+            confirm_card_sender=FakeConfirmCardSender(),
+            confirm_id_factory=lambda: "confirm-superseded",
+            now_factory=lambda: current_time,
+        )
+
+        await agent_loop.run(session, "发通知", actor_id="user-1", provider_message_id="msg-1")
+        cancellation = await agent_loop.cancel_pending_interaction_for_session(
+            session,
+            reason="superseded_by_new_message",
+            actor_id="user-1",
+            provider_message_id="msg-2",
+        )
+        cancelled = await store.get_pending_interaction("confirm-superseded")
+        restored_session = await store.get_session(session.session_id)
+        messages = await store.list_messages(session.session_id)
+
+    assert cancellation is not None
+    assert cancellation.reason == "superseded_by_new_message"
+    assert cancellation.notice_text == "已取消:未确认，[发送钉钉通知] 未执行。"
+    assert cancellation.session.state == "Idle"
+    assert dingtalk_client.calls == []
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.resolution is not None
+    assert cancelled.resolution["reason"] == "superseded_by_new_message"
+    assert cancelled.resolution["payload"] == {
+        "cancelled": True,
+        "reason": "superseded_by_new_message",
+        "actor_id": "user-1",
+        "provider_message_id": "msg-2",
+    }
+    assert restored_session is not None
+    assert restored_session.state == "Idle"
+    assert [(message.role, message.metadata.get("status")) for message in messages] == [
+        ("user", None),
+        ("assistant", "awaiting_interaction"),
+        ("system", "interaction_cancelled"),
+        ("tool", "interaction_cancelled"),
+    ]
+    assert [message.content for message in messages[:3]] == [
+        "发通知",
+        "请在钉钉确认卡片中确认是否执行：发送钉钉通知",
+        "已取消:未确认，[发送钉钉通知] 未执行。",
+    ]
+    assert json.loads(messages[3].content) == {
+        "status": "Cancelled",
+        "kind": "confirm",
+        "reason": "superseded_by_new_message",
+        "correlation_id": "confirm-superseded",
+        "action": "发送钉钉通知",
+        "details": {"target": "user:user-1", "content": "请大家 3 点开会"},
+    }
+    assert [
+        (message.role, message.metadata.get("status"), message.content) for message in messages[:3]
+    ] == [
+        ("user", None, "发通知"),
+        ("assistant", "awaiting_interaction", "请在钉钉确认卡片中确认是否执行：发送钉钉通知"),
+        ("system", "interaction_cancelled", "已取消:未确认，[发送钉钉通知] 未执行。"),
+    ]
+    assert len(llm_client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_timeout_cancels_pending_confirm_with_system_notice(
+    tmp_path,
+) -> None:
+    """Expired pending confirm interactions should cancel as timeout without tool execution."""
+
+    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    llm_client = ToolCallingCompleter(
+        [
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu-notify",
+                    "name": "send_notification",
+                    "input": {"content": "超时通知"},
+                }
+            ]
+        ]
+    )
+    dingtalk_client = FakeNotificationDingTalkClient()
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=CapabilityRegistry([SEND_NOTIFICATION]),
+            capability_services={"dingtalk_client": dingtalk_client},
+            confirm_card_sender=FakeConfirmCardSender(),
+            confirm_id_factory=lambda: "confirm-timeout",
+            confirm_timeout_seconds=60,
+            now_factory=lambda: current_time,
+        )
+
+        await agent_loop.run(session, "发通知")
+        current_time = datetime(2026, 1, 1, 12, 1, 1, tzinfo=UTC)
+        cancellation = await agent_loop.cancel_pending_interaction_for_session(
+            session,
+            reason="timeout",
+        )
+        cancelled = await store.get_pending_interaction("confirm-timeout")
+        messages = await store.list_messages(session.session_id)
+
+    assert cancellation is not None
+    assert cancellation.reason == "timeout"
+    assert cancellation.notice_text == "已取消:确认超时，[发送钉钉通知] 未执行。"
+    assert dingtalk_client.calls == []
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.resolution is not None
+    assert cancelled.resolution["responder"] == "runtime:timeout"
+    assert cancelled.resolution["reason"] == "timeout"
+    assert [(message.role, message.metadata.get("reason")) for message in messages] == [
+        ("user", None),
+        ("assistant", None),
+        ("system", "timeout"),
+        ("tool", "timeout"),
+    ]
+    assert len(llm_client.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_injects_granted_credential_context(tmp_path) -> None:
     """Granted Authorizer handles should be available through `ctx.user`."""
 

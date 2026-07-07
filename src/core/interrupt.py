@@ -112,19 +112,28 @@ class SessionInterrupt:
         reply: Mapping[str, Any] | None = None,
         *,
         responder: str,
+        require_responder: bool = True,
+        allow_expired: bool = False,
         now: datetime | None = None,
     ) -> InterruptResolution:
-        """Cancel this interrupt for the expected responder before expiry."""
+        """Cancel this interrupt, optionally bypassing responder or expiry checks."""
 
-        normalized = self.resolve(reply, responder=responder, now=now)
+        normalized_responder = _non_empty_string(responder, "responder")
+        if require_responder and normalized_responder != self.responder:
+            raise SessionInterruptResponderMismatch(
+                f"Interrupt {self.correlation_id} can only be resolved by {self.responder}"
+            )
+        resolved_at = _to_utc(now or datetime.now(UTC))
+        if resolved_at > self.expires_at and not allow_expired:
+            raise SessionInterruptExpired(f"Interrupt expired: {self.correlation_id}")
         return InterruptResolution(
-            correlation_id=normalized.correlation_id,
-            kind=normalized.kind,
+            correlation_id=self.correlation_id,
+            kind=self.kind,
             status="cancelled",
-            responder=normalized.responder,
-            payload=normalized.payload,
+            responder=normalized_responder,
+            payload=_plain_json_object(reply or {}, "reply"),
             reason=_non_empty_string(reason, "reason"),
-            resolved_at=normalized.resolved_at,
+            resolved_at=resolved_at,
         )
 
     def to_context(self) -> dict[str, Any]:
@@ -293,6 +302,8 @@ class SessionInterruptManager:
         reply: Mapping[str, Any] | None = None,
         *,
         responder: str,
+        require_responder: bool = True,
+        allow_expired: bool = False,
     ) -> InterruptResolution:
         """Cancel a pending interrupt and restore the Session to Idle."""
 
@@ -304,6 +315,8 @@ class SessionInterruptManager:
             reason,
             reply,
             responder=responder,
+            require_responder=require_responder,
+            allow_expired=allow_expired,
             now=_to_utc(self._now_factory()),
         )
         await self._store.resolve_pending_interaction(

@@ -11,6 +11,9 @@ from src.core.agent_loop import (
     CapabilityExecutionContext,
     CapabilityServiceError,
     ConfirmCallbackResult,
+    InteractionCancellationReason,
+    InteractionCancellationResult,
+    PendingInteractionInfo,
     ToolExecutor,
 )
 from src.core.inbox import InboxEvent, SessionInbox, SessionInboxDispatcher
@@ -45,7 +48,10 @@ __all__ = [
     "GROUP_WELCOME_REPLY",
     "InboxEvent",
     "InteractionCallbackRouter",
+    "InteractionCancellationReason",
+    "InteractionCancellationResult",
     "InterruptResolution",
+    "PendingInteractionInfo",
     "Principal",
     "Session",
     "SessionInbox",

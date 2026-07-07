@@ -1,48 +1,42 @@
 # Execution Plan
 
-I will not record private chain-of-thought, but I will keep this file updated with the actionable plan and progress.
+I identified the first incomplete task in `TODO.md` as **T29 `[TODO]` 取消双来源与系统通告**. This file records the actionable plan and progress updates; it intentionally contains a concise execution plan rather than private chain-of-thought.
 
-1. Read TODO.md first and identify the first task whose heading is not prefixed with [DONE].
-2. Inspect only the files needed to understand that task, plus recent git context if it directly mentions an unfinished issue relevant to the selected task.
-3. Implement the selected task completely, adding a prerequisite task to TODO.md only if a concrete blocker makes correct execution impossible.
-4. Run formatting, linting, and the relevant/full tests required by TODO.md and the repository workflow.
-5. Update TODO.md by prefixing the completed task heading with [DONE] and filling its completion record; update PLAN.md only if phase-level sequencing changes.
-6. Commit all changes related to this invocation with a descriptive message and the required co-author trailer, then stop without starting the next task.
+## Current task
 
-## Current Task
+Implement M5 T29:
 
-Selected first incomplete TODO: T28 confirm 卡片与回调匹配.
+- Cancel pending `AwaitingInteraction` from two sources:
+  - a new inbound message while awaiting interaction (`superseded_by_new_message`)
+  - expiration after `session.confirm_timeout_sec` / 30 minutes (`timeout`)
+- Runtime sends the system cancellation notice directly, using content derived from tool input/action details.
+- The suspended tool receives `Cancelled`, and the agent finishing turn stays silent except for history/state updates.
+- Enforce outbound three-source separation from architecture §8.4b.
+- Ensure M4 consent is represented through the unified `consent` interrupt path.
 
-Task requirements:
-- Add `ctx.confirm(action, details)` so sensitive/runtime-controlled tool actions can send a DingTalk interactive card with confirm/cancel buttons.
-- Store an unguessable `correlation_id` in callback data and suspend the session through the existing pending-interaction primitive.
-- Register and normalize DingTalk card callback events, then route callbacks by `correlation_id` plus responder to the pending interaction and resolve it without invoking the LLM.
-- Ensure confirm-card text comes from tool/runtime inputs rather than LLM-generated wording.
-- Validate that a notification-like tool executes only after confirm and does not execute after cancel.
+## Step-by-step plan
 
-Execution steps:
-1. Inspect existing interrupt, agent loop, capability context, DingTalk stream/outbound code, and tests.
-2. Design the narrow integration point for `ctx.confirm(...)` using existing service injection and `SessionInterruptManager`.
-3. Add DingTalk interactive-card send/callback support and a deterministic callback router.
-4. Add or update a small confirm-gated tool/test fixture to prove confirm-before-execute and cancel-does-not-execute behavior.
-5. Run formatting, linting, focused tests, then the full test suite.
-6. Mark T28 `[DONE]`, update the completion record, commit all task changes, and stop.
+1. Inspect the latest commit message for directly relevant unfinished T29/M5 notes.
+2. Read the current M5 implementation surfaces: interrupt manager, agent loop confirm/consent paths, router/stream inbound flow, outbound adapter, store schema, config timeout, and tests around T27/T28.
+3. Map existing pending-interaction behavior and identify the minimal cohesive changes for:
+   - new-message cancellation before processing the new message normally
+   - timeout cancellation and notification
+   - silent agent/tool completion after cancellation
+4. Implement the runtime cancellation API in the appropriate core layer, reusing existing persisted interrupt records and session state.
+5. Wire new-message cancellation into the inbound message path before agent-loop execution.
+6. Add timeout handling tied to interrupt expiration, including direct system notice delivery.
+7. Add or update focused tests for:
+   - new message cancels pending confirm and then processes normally
+   - timeout cancels pending confirm and sends one system notice
+   - cancelled tool path does not produce an extra AI cancellation reply
+   - consent still uses the unified interrupt storage/model
+8. Run formatting, linting, and the relevant/full test suites in the required order.
+9. Mark T29 `[DONE]` in `TODO.md` with a completion record.
+10. Commit all task changes with a descriptive T29 commit message and the required co-author trailer.
 
-## Progress Update
+## Progress
 
-Implemented the T28 core flow:
-- Added DingTalk card callback normalization and Stream topic registration.
-- Added OpenAPI confirm-card create/deliver support with callback correlation data.
-- Added `ctx.confirm(action, details)` suspension in `AgentLoop`, plus approved/cancel callback resolution that bypasses the LLM.
-- Added a confirm-gated `send_notification` system capability and targeted tests for approve/cancel behavior.
-
-Focused formatting, linting, and confirm-related tests pass. Next step: update README/TODO, run full validation, and commit.
-
-## Completion Update
-
-T28 is implemented and documented:
-- TODO.md marks T28 `[DONE]` with completion details.
-- README documents `ctx.confirm(...)`, card callback routing, and the `send_notification` capability.
-- Full formatting, linting, pytest suite, and startup smoke validation passed.
-
-Next: inspect the final diff, commit all invocation changes, and stop.
+- 2026-07-07 08:12: Identified T29 as the first incomplete task and updated this execution plan.
+- 2026-07-07 08:20: Implemented runtime cancellation support in `AgentLoop`, wired new-message cancellation and timeout scheduling into inbound handling, and added focused tests for system notices and silent cancellation history.
+- 2026-07-07 08:20: Marked T29 `[DONE]`, updated README/TODO, and completed formatting, linting, focused tests, full pytest, and startup smoke validation.
+- 2026-07-07 08:21: Refined timeout cancellation to target the scheduled `correlation_id` so old timers cannot affect newer pending interactions in the same Session; re-ran focused tests, full pytest, and startup smoke successfully.

@@ -366,11 +366,18 @@
   - 已补充单测覆盖 interrupt cancel、卡片回调归一化/注册、confirm card OpenAPI 请求体、`ctx.confirm` 挂起、确认后执行、取消不执行和工具注册。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
 
-## T29 `[TODO]` 取消双来源与系统通告
+## [DONE] T29 取消双来源与系统通告
 - 取消来源(架构 §8.4b):AwaitingInteraction 时收到新消息(`superseded_by_new_message`)/ 30分钟超时(`timeout`)→ `Cancelled`。
 - 分工:运行时**直接推**系统消息("已取消:…[action]…未执行",内容来自入参)+ 挂起工具返回 Cancelled → agent 收尾轮**静默**(仅历史留痕)。
 - 出站三来源约束落实(架构 §8.4b);把 M4 的 NeedsConsent 归并为 `consent` 实例。
 - **验收**:等确认时发新消息 → 收到"已取消"系统消息 + 新消息被正常处理;超时同理;AI 不重复播报取消。
+- **完成记录(2026-07-07)**:
+  - 已在 `AgentLoop` 增加 pending interaction 运行时取消 API,支持 `superseded_by_new_message` 与 `timeout` 两种来源,取消后恢复 Session 为 `Idle`,并将 `Cancelled` 工具结果与系统通告写入 SQLite 历史。
+  - 已将入站处理改为在 Session `AwaitingInteraction` 时先取消既有 `confirm`/`consent` interrupt,直接发送"已取消..."系统消息,再让新消息正常进入 agent loop;卡片回调确认/取消仍绕过 LLM。
+  - 已新增 timeout scheduler,按 pending `expires_at` 触发 `timeout` 取消和系统通告;若 pending 已被确认/取消/授权恢复,超时任务会无副作用退出。
+  - 已保持取消收尾静默:取消路径不再调用 Claude 生成取消播报,只由运行时发送系统通告,同时在消息历史中保留 `Cancelled` 工具记录供后续追溯。
+  - 已补充 README 和单测,覆盖新消息取消后继续处理、超时系统通告、取消工具不执行且 LLM 不重复播报、`consent` 继续使用统一 `SessionInterrupt` 存储。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_agent_loop.py tests/test_main.py tests/test_interrupt.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T30 `[TODO]` 【REVIEW】M5 带外交互审阅
 - 审阅 T27–T29:correlation_id 是否不可伪造、responder 校验;取消两来源归一;系统通告 vs AI 收尾静默是否严格分工(防幻觉);pending 是否可落盘恢复。

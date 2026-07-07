@@ -89,6 +89,12 @@ card callback topic, normalized by `normalize_card_callback(...)`, and routed by
 deferred tool directly without another LLM roundtrip; cancel resolves the pending interaction without
 running the tool.
 
+If a Session is still `AwaitingInteraction`, a later inbound message cancels the pending interaction as
+`superseded_by_new_message`, sends a runtime system notice such as `已取消:未确认，[发送钉钉通知] 未执行。`,
+then processes the new message normally. Pending interactions also schedule a timeout cancellation at
+their persisted `expires_at`; timeout sends the system notice directly and records a silent
+`Cancelled` tool result in SQLite history without asking Claude to narrate the cancellation again.
+
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and
 `src/capabilities/user/<userId>/` in that order, so later tiers override earlier capabilities with
