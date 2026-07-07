@@ -379,10 +379,15 @@
   - 已补充 README 和单测,覆盖新消息取消后继续处理、超时系统通告、取消工具不执行且 LLM 不重复播报、`consent` 继续使用统一 `SessionInterrupt` 存储。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_agent_loop.py tests/test_main.py tests/test_interrupt.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T30 `[TODO]` 【REVIEW】M5 带外交互审阅
+## [DONE] T30 【REVIEW】M5 带外交互审阅
 - 审阅 T27–T29:correlation_id 是否不可伪造、responder 校验;取消两来源归一;系统通告 vs AI 收尾静默是否严格分工(防幻觉);pending 是否可落盘恢复。
 - 端到端:confirm、超时取消、新消息取消三条路径各验证。
 - 跑 `ruff`+`pytest`;输出问题清单并修复。
+- **完成记录(2026-07-07)**:
+  - 已审阅 T27–T29 的 `SessionInterrupt` 持久化、`confirm`/`consent` 统一挂起、不可预测 `confirm_<token_urlsafe(24)>` correlation id、卡片回调 responder 校验、确认/取消绕过 LLM、双来源取消和运行时系统通告/AI 静默分工。
+  - 问题清单:发现 pending interaction 虽已落盘,但 timeout scheduler 仅覆盖当前进程中新建的挂起交互;进程重启后既有 pending 不会按 `expires_at` 自动超时通告。已新增 active pending 列表查询、从持久化 Session 合成 OpenAPI 出站目标、Stream 启动时恢复 timeout 调度,确保重启恢复的 confirm/consent 仍会超时取消并发送系统通告。
+  - 已补充回归测试覆盖 active pending 只列出未终止记录、恢复调度按已落盘 pending 触发 timeout、合成 group 出站目标、既有 confirm/timeout/新消息取消/卡片回调路径保持通过。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_agent_loop.py tests/test_main.py tests/test_interrupt.py tests/test_store.py tests/test_dingtalk_stream.py tests/test_dingtalk_client.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ---
 

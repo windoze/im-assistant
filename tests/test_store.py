@@ -178,6 +178,7 @@ async def test_store_supports_basic_crud_for_all_t10_tables(tmp_path) -> None:
         )
         assert refreshed_token.access_token_ciphertext == "new-encrypted-access"
         assert refreshed_token.scopes == ("calendar:read",)
+
         assert refreshed_token.created_at == token.created_at
 
         assert await store.delete_token("principal-2", "calendar") is True
@@ -191,3 +192,52 @@ async def test_store_supports_basic_crud_for_all_t10_tables(tmp_path) -> None:
         assert await store.delete_session("session-1") is True
         assert await store.get_session("session-1") is None
         assert await store.list_messages("session-1") == []
+
+
+@pytest.mark.asyncio
+async def test_store_lists_active_pending_interactions_by_expiry(tmp_path) -> None:
+    """Recovered timeout scheduling needs all active pending rows in deterministic order."""
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        await store.upsert_session(
+            SessionRecord(
+                session_id="session-1",
+                conversation_id="conversation-1",
+                kind="dm",
+                bot_id="bot-1",
+                principal_id="principal-1",
+                actor_id="actor-1",
+            )
+        )
+        later = await store.create_pending_interaction(
+            PendingInteractionRecord(
+                correlation_id="confirm-later",
+                session_id="session-1",
+                kind="confirm",
+                responder_id="actor-1",
+                expires_at=datetime(2030, 1, 1, 0, 2, tzinfo=UTC),
+                payload={"action": "later"},
+            )
+        )
+        earlier = await store.create_pending_interaction(
+            PendingInteractionRecord(
+                correlation_id="confirm-earlier",
+                session_id="session-1",
+                kind="confirm",
+                responder_id="actor-1",
+                expires_at=datetime(2030, 1, 1, 0, 1, tzinfo=UTC),
+                payload={"action": "earlier"},
+            )
+        )
+        active_before_resolution = await store.list_pending_interactions()
+        await store.resolve_pending_interaction(
+            "confirm-earlier",
+            status="cancelled",
+            resolution={"cancelled": True},
+        )
+
+        active = await store.list_pending_interactions()
+
+    assert active_before_resolution == [earlier, later]
+    assert active == [later]

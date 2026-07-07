@@ -524,6 +524,20 @@ class SQLiteStore:
         )
         return None if row is None else _row_to_pending_interaction(row)
 
+    async def list_pending_interactions(self) -> list[PendingInteractionRecord]:
+        """Return all active pending interactions ordered by expiry time."""
+
+        rows = await self._fetchall(
+            """
+            SELECT *
+            FROM pending_interactions
+            WHERE status = 'pending'
+            ORDER BY expires_at, created_at
+            """,
+            (),
+        )
+        return [_row_to_pending_interaction(row) for row in rows]
+
     async def resolve_pending_interaction(
         self,
         correlation_id: str,

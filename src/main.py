@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from src.core.session import Session
     from src.core.session_manager import SessionRouteResult
     from src.infra.config import AppConfig
+    from src.infra.store import PendingInteractionRecord, SessionRecord
 
 logger = get_logger("im_assistant")
 ASSISTANT_SYSTEM_PROMPT = "你是企业内 AI 助手。请简洁、准确地回答用户问题。"
@@ -29,7 +31,7 @@ ASSISTANT_SYSTEM_PROMPT = "你是企业内 AI 助手。请简洁、准确地回�
 class ReplySender(Protocol):
     """Protocol for objects that can reply to DingTalk inbound events."""
 
-    async def reply(self, inbound: InboundEvent, text: str) -> object:
+    async def reply(self, inbound: object, text: str) -> object:
         """Send a reply to the source conversation for an inbound event."""
 
 
@@ -81,6 +83,25 @@ class AgentRunner(Protocol):
         """Cancel a pending interaction by correlation id."""
 
 
+class PendingInteractionStore(Protocol):
+    """Store surface needed to recover timeout scheduling after process restart."""
+
+    async def list_pending_interactions(self) -> Sequence[PendingInteractionRecord]:
+        """Return active pending interactions."""
+
+    async def get_session(self, session_id: str) -> SessionRecord | None:
+        """Return a persisted Session by id."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledInteractionInfo:
+    """Timeout metadata for recovered pending interactions."""
+
+    correlation_id: str
+    kind: str
+    expires_at: datetime
+
+
 class InteractionTimeoutScheduler:
     """Schedule timeout cancellations for pending Session interactions."""
 
@@ -91,9 +112,9 @@ class InteractionTimeoutScheduler:
 
     def schedule(
         self,
-        event: InboundEvent,
+        event: object,
         session: Session,
-        pending: PendingInteractionInfo | None,
+        pending: PendingInteractionInfo | ScheduledInteractionInfo | None,
     ) -> None:
         """Schedule a timeout notice for a pending interaction."""
 
@@ -121,9 +142,9 @@ class InteractionTimeoutScheduler:
     async def _run_timeout(
         self,
         delay: float,
-        event: InboundEvent,
+        event: object,
         session: Session,
-        pending: PendingInteractionInfo,
+        pending: PendingInteractionInfo | ScheduledInteractionInfo,
     ) -> None:
         try:
             await asyncio.sleep(delay)
@@ -145,6 +166,34 @@ class InteractionTimeoutScheduler:
             )
         finally:
             self._tasks.pop(pending.correlation_id, None)
+
+
+async def schedule_persisted_interaction_timeouts(
+    store: PendingInteractionStore,
+    timeout_scheduler: InteractionTimeoutScheduler,
+) -> None:
+    """Schedule timeout cancellation for pending interactions restored from SQLite."""
+
+    for pending in await store.list_pending_interactions():
+        session_record = await store.get_session(pending.session_id)
+        if session_record is None:
+            logger.warning(
+                "pending_interaction_session_missing",
+                extra={
+                    "correlation_id": pending.correlation_id,
+                    "session_id": pending.session_id,
+                },
+            )
+            continue
+        timeout_scheduler.schedule(
+            _reply_target_from_pending(session_record, pending),
+            _session_from_record(session_record, responder_id=pending.responder_id),
+            ScheduledInteractionInfo(
+                correlation_id=pending.correlation_id,
+                kind=pending.kind,
+                expires_at=pending.expires_at,
+            ),
+        )
 
 
 async def main(*, start_stream: bool = False, config: AppConfig | None = None) -> None:
@@ -229,6 +278,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                     )
                     callback_router = InteractionCallbackRouter(agent_loop)
                     timeout_scheduler = InteractionTimeoutScheduler(agent_loop, outbound)
+                    await schedule_persisted_interaction_timeouts(store, timeout_scheduler)
 
                     async def process_event(event: InboundEvent) -> None:
                         await handle_inbound_event(
@@ -364,6 +414,68 @@ async def _on_inbound_message(
             [{"role": "user", "content": message.text}],
         )
     await outbound.reply(message, reply_text)
+
+
+def _reply_target_from_pending(
+    session: SessionRecord,
+    pending: PendingInteractionRecord,
+) -> object:
+    from src.adapters.dingtalk import DingTalkReplyTarget
+
+    return DingTalkReplyTarget(
+        sender_staff_id=_required_string(pending.responder_id, "pending.responder_id"),
+        conversation_type=_conversation_type_from_kind(session.kind),
+        conversation_id=_required_string(session.conversation_id, "session.conversation_id"),
+        open_conversation_id=_open_conversation_id_from_session(session),
+        msg_id=f"pending:{_required_string(pending.correlation_id, 'pending.correlation_id')}",
+    )
+
+
+def _session_from_record(session: SessionRecord, *, responder_id: str) -> Session:
+    from src.core import Actor, BotIdentity, Principal, Session
+
+    kind = session.kind
+    return Session(
+        session_id=_required_string(session.session_id, "session.session_id"),
+        conversation_id=_required_string(session.conversation_id, "session.conversation_id"),
+        kind=kind,
+        bot=BotIdentity(id=_required_string(session.bot_id, "session.bot_id")),
+        principal=Principal(
+            kind="group" if kind == "group" else "user",
+            id=_required_string(session.principal_id, "session.principal_id"),
+        ),
+        actor=Actor(
+            id=_required_string(responder_id, "pending.responder_id"),
+            display_name=_display_name_from_context(session.context, responder_id),
+        ),
+        context=session.context,
+        state=session.state,
+        lifecycle=session.lifecycle,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+def _conversation_type_from_kind(kind: str) -> int:
+    if kind == "dm":
+        return 1
+    if kind == "group":
+        return 2
+    raise ValueError(f"Stored session kind is invalid: {kind}")
+
+
+def _open_conversation_id_from_session(session: SessionRecord) -> str:
+    value = session.context.get("open_conversation_id")
+    if isinstance(value, str) and value.strip() != "":
+        return value.strip()
+    return _required_string(session.conversation_id, "session.conversation_id")
+
+
+def _display_name_from_context(context: Mapping[str, object], fallback: str) -> str:
+    value = context.get("last_actor_nick")
+    if isinstance(value, str) and value.strip() != "":
+        return value.strip()
+    return _required_string(fallback, "pending.responder_id")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

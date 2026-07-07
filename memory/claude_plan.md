@@ -1,42 +1,29 @@
 # Execution Plan
 
-I identified the first incomplete task in `TODO.md` as **T29 `[TODO]` 取消双来源与系统通告**. This file records the actionable plan and progress updates; it intentionally contains a concise execution plan rather than private chain-of-thought.
+I identified the first incomplete task in `TODO.md` as **T30 `[TODO]` 【REVIEW】M5 带外交互审阅**. This file records the actionable plan and progress updates; it intentionally contains a concise execution plan rather than private chain-of-thought.
 
 ## Current task
 
-Implement M5 T29:
+Review and validate M5 T27-T29:
 
-- Cancel pending `AwaitingInteraction` from two sources:
-  - a new inbound message while awaiting interaction (`superseded_by_new_message`)
-  - expiration after `session.confirm_timeout_sec` / 30 minutes (`timeout`)
-- Runtime sends the system cancellation notice directly, using content derived from tool input/action details.
-- The suspended tool receives `Cancelled`, and the agent finishing turn stays silent except for history/state updates.
-- Enforce outbound three-source separation from architecture §8.4b.
-- Ensure M4 consent is represented through the unified `consent` interrupt path.
+- `correlation_id` must be unpredictable and card callbacks must validate responder identity.
+- Confirm/consent interrupt creation, persistence, resolution, cancellation, and timeout behavior must be unified.
+- Runtime system cancellation notices must be separate from AI replies, and cancellation completion must stay silent.
+- Pending interaction records must be persisted and recoverable enough for the documented runtime behavior.
+- End-to-end-style tests should cover confirm, timeout cancellation, and new-message cancellation paths.
 
 ## Step-by-step plan
 
-1. Inspect the latest commit message for directly relevant unfinished T29/M5 notes.
-2. Read the current M5 implementation surfaces: interrupt manager, agent loop confirm/consent paths, router/stream inbound flow, outbound adapter, store schema, config timeout, and tests around T27/T28.
-3. Map existing pending-interaction behavior and identify the minimal cohesive changes for:
-   - new-message cancellation before processing the new message normally
-   - timeout cancellation and notification
-   - silent agent/tool completion after cancellation
-4. Implement the runtime cancellation API in the appropriate core layer, reusing existing persisted interrupt records and session state.
-5. Wire new-message cancellation into the inbound message path before agent-loop execution.
-6. Add timeout handling tied to interrupt expiration, including direct system notice delivery.
-7. Add or update focused tests for:
-   - new message cancels pending confirm and then processes normally
-   - timeout cancels pending confirm and sends one system notice
-   - cancelled tool path does not produce an extra AI cancellation reply
-   - consent still uses the unified interrupt storage/model
-8. Run formatting, linting, and the relevant/full test suites in the required order.
-9. Mark T29 `[DONE]` in `TODO.md` with a completion record.
-10. Commit all task changes with a descriptive T29 commit message and the required co-author trailer.
+1. Inspect the latest commit message for directly relevant unfinished M5/T30 notes.
+2. Read M5 implementation surfaces: interrupt primitives, agent loop confirm/consent and cancellation paths, main inbound routing/timeout scheduling, DingTalk card callback normalization, outbound client methods, persistence schema, and existing M5 tests.
+3. Compare the implementation against T30 review criteria and architecture §8.4/§8.4b.
+4. Fix any high-confidence defects found during the review; if no production defect is found, add missing regression coverage required by T30.
+5. Run formatting, linting, focused M5 tests, and full pytest in the required order.
+6. Update `TODO.md` by marking T30 `[DONE]` and adding the completion record with the review findings and validation.
+7. Commit all changes for T30 with the required co-author trailer, then stop.
 
 ## Progress
 
-- 2026-07-07 08:12: Identified T29 as the first incomplete task and updated this execution plan.
-- 2026-07-07 08:20: Implemented runtime cancellation support in `AgentLoop`, wired new-message cancellation and timeout scheduling into inbound handling, and added focused tests for system notices and silent cancellation history.
-- 2026-07-07 08:20: Marked T29 `[DONE]`, updated README/TODO, and completed formatting, linting, focused tests, full pytest, and startup smoke validation.
-- 2026-07-07 08:21: Refined timeout cancellation to target the scheduled `correlation_id` so old timers cannot affect newer pending interactions in the same Session; re-ran focused tests, full pytest, and startup smoke successfully.
+- 2026-07-07 08:22: Identified T30 as the first incomplete task and updated this execution plan.
+- 2026-07-07 08:27: Review found a T30-relevant recovery gap: pending interactions are persisted, but timeout cancellation tasks are only scheduled for interactions created in the current process. I will add persisted-pending listing, synthesize OpenAPI reply targets from stored Sessions, schedule recovered timeouts on Stream startup, and add regression coverage.
+- 2026-07-07 08:29: Implemented recovered timeout scheduling, added focused tests, updated README/TODO, and completed formatting, linting, focused tests, full pytest, and startup smoke validation.

@@ -21,11 +21,13 @@ from src.core import (
     Session,
     SessionRouteResult,
 )
+from src.infra.store import PendingInteractionRecord, SessionRecord, SQLiteStore
 from src.main import (
     ASSISTANT_SYSTEM_PROMPT,
     InteractionTimeoutScheduler,
     handle_inbound_event,
     main,
+    schedule_persisted_interaction_timeouts,
 )
 
 
@@ -205,6 +207,68 @@ async def test_interaction_timeout_scheduler_sends_system_notice() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persisted_pending_interaction_timeout_is_scheduled_after_restart(tmp_path) -> None:
+    """Pending interactions restored from SQLite should still timeout and notify users."""
+
+    outbound = FakeOutbound()
+    cancellation = InteractionCancellationResult(
+        correlation_id="confirm-recovered",
+        kind="confirm",
+        reason="timeout",
+        notice_text="已取消:确认超时，[发送钉钉通知] 未执行。",
+        session=_session(state="Idle"),
+    )
+    agent_loop = FakeAgentLoop("unused", cancellation_result=cancellation)
+    scheduler = InteractionTimeoutScheduler(agent_loop, outbound)
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        await store.upsert_session(
+            SessionRecord(
+                session_id="dingtalk:group:conversation-1",
+                conversation_id="conversation-1",
+                kind="group",
+                bot_id="robot-code",
+                principal_id="group:open-conversation-1",
+                actor_id="user-1",
+                state="AwaitingInteraction",
+                context={
+                    "open_conversation_id": "open-conversation-1",
+                    "last_actor_nick": "Alice",
+                },
+            )
+        )
+        await store.create_pending_interaction(
+            PendingInteractionRecord(
+                correlation_id="confirm-recovered",
+                session_id="dingtalk:group:conversation-1",
+                kind="confirm",
+                responder_id="user-1",
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                payload={"action": "发送钉钉通知"},
+            )
+        )
+
+        await schedule_persisted_interaction_timeouts(store, scheduler)
+        for _ in range(10):
+            if outbound.replies:
+                break
+            await asyncio.sleep(0)
+        await scheduler.aclose()
+
+    assert agent_loop.cancellations_by_id == [("confirm-recovered", "timeout", None, None)]
+    assert len(outbound.replies) == 1
+    target, notice_text = outbound.replies[0]
+    assert notice_text == "已取消:确认超时，[发送钉钉通知] 未执行。"
+    assert target.sender_staff_id == "user-1"
+    assert target.conversation_type == 2
+    assert target.conversation_id == "conversation-1"
+    assert target.open_conversation_id == "open-conversation-1"
+    assert target.session_webhook == ""
+    assert target.msg_id == "pending:confirm-recovered"
+
+
+@pytest.mark.asyncio
 async def test_handle_inbound_event_replies_to_unsupported_message_type(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -262,12 +326,12 @@ def _session(*, state: str = "Idle") -> Session:
 
 
 class FakeOutbound:
-    replies: list[tuple[InboundEvent, str]]
+    replies: list[tuple[object, str]]
 
     def __init__(self) -> None:
         self.replies = []
 
-    async def reply(self, inbound: InboundEvent, text: str) -> object:
+    async def reply(self, inbound: object, text: str) -> object:
         self.replies.append((inbound, text))
         return None
 

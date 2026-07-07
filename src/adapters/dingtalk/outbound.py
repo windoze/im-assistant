@@ -15,7 +15,6 @@ from src.infra.log import get_logger
 
 logger = get_logger(__name__)
 
-ReplyTarget = InboundMessage | UnsupportedInboundMessage
 ReplyTransport = Literal["session_webhook", "openapi_oto", "openapi_group"]
 DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 10.0
 
@@ -26,6 +25,22 @@ class ReplyResult:
 
     transport: ReplyTransport
     payload: Any
+
+
+@dataclass(frozen=True, slots=True)
+class DingTalkReplyTarget:
+    """Stored conversation target for runtime-originated DingTalk replies."""
+
+    sender_staff_id: str
+    conversation_type: int
+    conversation_id: str
+    open_conversation_id: str
+    session_webhook: str = ""
+    msg_id: str = "runtime"
+    session_webhook_expired_time: int | None = None
+
+
+ReplyTarget = InboundMessage | UnsupportedInboundMessage | DingTalkReplyTarget
 
 
 class DingTalkOutbound:

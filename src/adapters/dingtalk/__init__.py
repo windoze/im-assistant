@@ -13,7 +13,7 @@ from src.adapters.dingtalk.message import (
     normalize_chatbot_message,
     normalize_chatbot_message_event,
 )
-from src.adapters.dingtalk.outbound import DingTalkOutbound, ReplyResult, reply
+from src.adapters.dingtalk.outbound import DingTalkOutbound, DingTalkReplyTarget, ReplyResult, reply
 from src.adapters.dingtalk.stream import (
     DingTalkCardCallbackHandler,
     DingTalkChatbotCallbackHandler,
@@ -25,6 +25,7 @@ __all__ = [
     "DingTalkChatbotCallbackHandler",
     "DingTalkCardCallbackHandler",
     "DingTalkOutbound",
+    "DingTalkReplyTarget",
     "DingTalkStreamAdapter",
     "CardCallbackEvent",
     "CardDecision",
