@@ -72,7 +72,7 @@ def classify_inbound_message(
     if session is not None and session.state == "AwaitingInteraction":
         return InboundMessageRoute(kind="pending_interaction")
 
-    command_text = _command_text(event)
+    command_text = extract_command_text(event, session=session)
     if command_text is not None:
         return InboundMessageRoute(kind="command", command_text=command_text)
 
@@ -96,13 +96,33 @@ class InteractionCallbackRouter:
         )
 
 
-def _command_text(event: object) -> str | None:
+def extract_command_text(
+    event: object,
+    *,
+    session: Session | None = None,
+) -> str | None:
+    """Return normalized slash-command text for DM or group mention syntax."""
+
     text = getattr(event, "text", None)
     if not isinstance(text, str):
         return None
     stripped = text.lstrip()
     if stripped.startswith("/"):
         return stripped
+    if session is not None and session.kind == "group":
+        return _group_mention_command_text(stripped)
+    return None
+
+
+def _group_mention_command_text(stripped_text: str) -> str | None:
+    remaining = stripped_text
+    while remaining.startswith("@"):
+        mention_parts = remaining.split(maxsplit=1)
+        if len(mention_parts) != 2:
+            return None
+        remaining = mention_parts[1].lstrip()
+        if remaining.startswith("/"):
+            return remaining
     return None
 
 
@@ -119,4 +139,5 @@ __all__ = [
     "InteractionCallbackRouter",
     "TextInboundEvent",
     "classify_inbound_message",
+    "extract_command_text",
 ]

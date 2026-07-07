@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import pytest
 
@@ -163,6 +164,39 @@ async def test_handle_inbound_event_routes_slash_command_to_handler() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_inbound_event_routes_group_mention_slash_command_to_handler() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(
+        text="@助手 /help",
+        conversation_type=2,
+        conversation_id="group-conversation",
+        open_conversation_id="open-group-1",
+    )
+    routed_session = _session(kind="group")
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=routed_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("unused")
+    command_handler = FakeCommandHandler("command reply")
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+        command_handler=command_handler,
+    )
+
+    assert command_handler.calls == [(routed_session, "/help", event)]
+    assert agent_loop.calls == []
+    assert outbound.replies == [(event, "command reply")]
+
+
+@pytest.mark.asyncio
 async def test_handle_inbound_event_keeps_unconfigured_slash_command_out_of_llm() -> None:
     outbound = FakeOutbound()
     event = _text_event(text="/help")
@@ -272,6 +306,40 @@ async def test_cancel_command_handles_pending_interaction_without_generic_supers
     outbound = FakeOutbound()
     event = _text_event(text="/cancel", msg_id="msg-cancel")
     awaiting_session = _session(state="AwaitingInteraction")
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=awaiting_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("unused")
+    command_handler = FakeCommandHandler("已取消:用户主动取消，[发送钉钉通知] 未执行。")
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+        command_handler=command_handler,
+    )
+
+    assert agent_loop.cancellations == []
+    assert command_handler.calls == [(awaiting_session, "/cancel", event)]
+    assert outbound.replies == [(event, "已取消:用户主动取消，[发送钉钉通知] 未执行。")]
+
+
+@pytest.mark.asyncio
+async def test_group_mention_cancel_command_handles_pending_interaction() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(
+        text="@助手 /cancel",
+        msg_id="msg-cancel",
+        conversation_type=2,
+        conversation_id="group-conversation",
+        open_conversation_id="open-group-1",
+    )
+    awaiting_session = _session(kind="group", state="AwaitingInteraction")
     session_manager = FakeSessionManager(
         SessionRouteResult(
             session=awaiting_session,
@@ -436,13 +504,16 @@ def _text_event(
     )
 
 
-def _session(*, state: str = "Idle") -> Session:
+def _session(*, state: str = "Idle", kind: Literal["dm", "group"] = "dm") -> Session:
     return Session(
-        session_id="dingtalk:dm:conversation-1",
+        session_id=f"dingtalk:{kind}:conversation-1",
         conversation_id="conversation-1",
-        kind="dm",
+        kind=kind,
         bot=BotIdentity(id="robot-code"),
-        principal=Principal(kind="user", id="user:user-1"),
+        principal=Principal(
+            kind="group" if kind == "group" else "user",
+            id="group:open-group-1" if kind == "group" else "user:user-1",
+        ),
         actor=Actor(id="user-1", display_name="Alice"),
         state=state,
     )

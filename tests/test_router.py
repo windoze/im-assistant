@@ -33,6 +33,24 @@ def test_classifier_routes_slash_command_before_agent_loop() -> None:
     assert route == InboundMessageRoute(kind="command", command_text="/reset now")
 
 
+def test_classifier_routes_group_mention_slash_command() -> None:
+    """Group @mention command syntax should still enter the command branch."""
+
+    route = classify_inbound_message(TextEvent("@助手 /reset now"), session=_session(kind="group"))
+
+    assert route == InboundMessageRoute(kind="command", command_text="/reset now")
+
+
+def test_classifier_keeps_group_mention_natural_language_in_agent_loop() -> None:
+    """A group @mention followed by normal text should not be treated as a command."""
+
+    route = classify_inbound_message(
+        TextEvent("@助手 please /reset"), session=_session(kind="group")
+    )
+
+    assert route == InboundMessageRoute(kind="agent_loop")
+
+
 def test_classifier_routes_regular_text_to_agent_loop() -> None:
     """Natural language should continue to the normal agent loop."""
 
@@ -56,13 +74,16 @@ class TextEvent:
     text: str
 
 
-def _session(*, state: str = "Idle") -> Session:
+def _session(*, state: str = "Idle", kind: str = "dm") -> Session:
     return Session(
-        session_id="dingtalk:dm:conversation-1",
+        session_id=f"dingtalk:{kind}:conversation-1",
         conversation_id="conversation-1",
-        kind="dm",
+        kind=kind,
         bot=BotIdentity(id="robot-code"),
-        principal=Principal(kind="user", id="user:user-1"),
+        principal=Principal(
+            kind="group" if kind == "group" else "user",
+            id="group:open-group-1" if kind == "group" else "user:user-1",
+        ),
         actor=Actor(id="user-1", display_name="Alice"),
         state=state,
     )

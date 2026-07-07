@@ -302,7 +302,9 @@ def _parse_command_text(command_text: str) -> tuple[str, str]:
     normalized = _non_empty_string(command_text, "command_text").lstrip()
     if not normalized.startswith("/"):
         raise ValueError("command_text must start with '/'")
-    name, _, args_text = normalized.partition(" ")
+    parts = normalized.split(maxsplit=1)
+    name = parts[0]
+    args_text = parts[1] if len(parts) == 2 else ""
     return _normalize_command_name(name), args_text.strip()
 
 

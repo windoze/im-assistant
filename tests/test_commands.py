@@ -77,6 +77,25 @@ async def test_registry_executes_authorized_user_command_with_parsed_args() -> N
 
 
 @pytest.mark.asyncio
+async def test_registry_accepts_non_space_whitespace_after_command_name() -> None:
+    """Command parsing should treat tabs and newlines as command separators."""
+
+    registry = CommandRegistry(
+        commands=[
+            Command(
+                "/say",
+                _reply("ok"),
+                args_spec=CommandArgsSpec(min_args=2, max_args=2),
+            )
+        ]
+    )
+
+    reply = await registry.handle_command(_session(), '/say\t"hello world"\nAlice', object())
+
+    assert reply == "ok"
+
+
+@pytest.mark.asyncio
 async def test_registry_rejects_invalid_arguments_before_handler() -> None:
     """Argument spec failures should be deterministic command replies."""
 

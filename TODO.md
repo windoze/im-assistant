@@ -428,9 +428,14 @@
   - 已补充单测覆盖六条指令、`/connect` 授权预热/timeout 调度、`/reset` 历史清空、`/cancel` pending 路由和既有命令注册表行为。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_builtin_commands.py tests/test_commands.py tests/test_main.py tests/test_agent_loop.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T34 `[TODO]` 【REVIEW】M6 指令通道审阅
+## [DONE] T34 【REVIEW】M6 指令通道审阅
 - 审阅 T31–T33:三岔口优先级正确;指令表与工具表边界清晰;鉴权到位;`/connect`/`/disconnect` 与 TokenVault 一致;注入 API 是否是唯一影响 AI 的途径。
 - 跑 `ruff`+`pytest`;端到端验证各指令;输出问题清单并修复。
+- **完成记录(2026-07-07)**:
+  - 已审阅 T31–T33 的入站三岔口、指令注册表与 AI capability/tool 表边界、基于 actor 的 `requires_role` 鉴权、`/connect` consent 预热、`/disconnect` TokenVault 撤销、`/cancel` pending 取消和 command injection API。
+  - 问题清单:发现 M6 文档要求的群聊 `@助手 /command` 语法未被分类器识别;pending 状态下 `@助手 /cancel` 会走普通新消息取消而非主动取消命令;命令名与参数之间若使用 tab/newline 等非空格分隔会解析失败。已修复为共享命令提取逻辑,支持 DM `/command` 与群聊 leading @mention `/command`,pending `/cancel` 复用同一路径,并将命令解析改为按任意空白分隔。
+  - 已补充回归测试覆盖群聊 @mention 指令、@mention 后自然语言不误判、pending 群聊 `/cancel` 主动取消和非空格分隔参数解析;README 已同步指令路由说明。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_router.py tests/test_commands.py tests/test_main.py tests/test_builtin_commands.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ---
 

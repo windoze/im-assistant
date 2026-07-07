@@ -68,6 +68,7 @@ from src.core.router import (
     InteractionCallbackRouter,
     TextInboundEvent,
     classify_inbound_message,
+    extract_command_text,
 )
 from src.core.session import Actor, BotIdentity, Principal, Session
 from src.core.session_manager import GROUP_WELCOME_REPLY, SessionManager, SessionRouteResult
@@ -140,5 +141,6 @@ __all__ = [
     "classify_inbound_message",
     "builtin_commands",
     "create_builtin_command_registry",
+    "extract_command_text",
     "inject_message",
 ]

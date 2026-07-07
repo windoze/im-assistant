@@ -373,7 +373,7 @@ async def handle_inbound_event(
     if route.kind == "pending_interaction":
         if session is None or agent_loop is None:
             raise ValueError("pending interaction routing requires a Session and agent_loop")
-        cancel_command_text = _cancel_command_text(event)
+        cancel_command_text = _cancel_command_text(event, session=session)
         if cancel_command_text is not None and command_handler is not None:
             await _handle_command_message(
                 event,
@@ -495,16 +495,15 @@ async def _on_inbound_message(
     await outbound.reply(message, reply_text)
 
 
-def _cancel_command_text(event: object) -> str | None:
-    text = getattr(event, "text", None)
-    if not isinstance(text, str):
+def _cancel_command_text(event: object, *, session: Session | None = None) -> str | None:
+    from src.core import extract_command_text
+
+    command_text = extract_command_text(event, session=session)
+    if command_text is None:
         return None
-    stripped = text.lstrip()
-    if stripped == "":
-        return None
-    parts = stripped.split()
+    parts = command_text.split()
     if len(parts) == 1 and parts[0].lower() == "/cancel":
-        return stripped
+        return command_text
     return None
 
 

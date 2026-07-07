@@ -97,8 +97,9 @@ interactions still expire; timeout sends the system notice directly and records 
 tool result in SQLite history without asking Claude to narrate the cancellation again.
 
 Before any text message enters the agent loop, `src.core.router.classify_inbound_message(...)`
-deterministically checks for an active pending interaction, then slash-command text beginning with `/`,
-and only sends ordinary messages to Claude. Slash commands are dispatched through the independent
+deterministically checks for an active pending interaction, then slash-command text beginning with `/`
+in DMs or after the leading group @mention, and only sends ordinary messages to Claude. Slash commands
+are dispatched through the independent
 `src.core.commands.CommandRegistry`, which checks command availability, actor role requirements, and
 argument specs before calling a deterministic handler. Built-ins are registered by
 `src.core.create_builtin_command_registry(...)`: `/help` lists visible commands and capabilities,
