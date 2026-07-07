@@ -49,8 +49,18 @@ while different conversations can continue in parallel; each agent turn persists
 out-of-band consent/confirm interrupt suspends the turn.
 
 On Stream startup the service idempotently initializes the SQLite database configured by
-`storage.database_path` with tables for sessions, message history, identity bindings, audit logs,
-pending interactions, and encrypted token material.
+`storage.database_path` with tables for sessions, message history, inbound-message idempotency,
+identity bindings, audit logs, pending OAuth state, pending interactions, and encrypted token
+material. Startup also normalizes recovered Session state: interrupted `RunningAgent` sessions return
+to `Idle`, Sessions with active pending rows are restored to `AwaitingInteraction`, and stale pending
+context is cleared when no pending row exists.
+
+The Stream adapter reconnects after disconnects with exponential backoff until the process is
+cancelled. Each triggered inbound DingTalk `msg_id` is claimed in SQLite before processing and marked
+processed only after the turn succeeds, so duplicate callbacks are skipped while failed attempts can
+be retried. Outbound replies are serialized by a small rate limiter to avoid burst-sending, and
+application-token OpenAPI calls retry once with a freshly fetched token when DingTalk reports the
+cached `access_token` is invalid or expired.
 
 `src.infra.audit.AuditLogger` writes append-only records to `audit_log` for security-relevant
 decisions: OBO authorization grants/consent/denials, confirm or consent resolutions/cancellations,
@@ -65,14 +75,16 @@ grants through the DingTalk refresh-token grant and clears rejected refresh toke
 start a new consent flow.
 
 `src.infra.oauth` provides the DingTalk OAuth2 HTTP endpoints for OBO flows. Applications create a
-short-lived `PendingAuthStore` nonce with the requesting actor identity, send the user to
+short-lived pending-auth nonce with the requesting actor identity, send the user to
 `/oauth/start?nonce=<nonce>`, and the aiohttp service redirects to DingTalk consent with
 `state=<nonce>`. `/oauth/callback` validates and consumes that state once, exchanges the authorization
 code at `/v1.0/oauth2/userAccessToken`, calls `/v1.0/contact/users/me` with the user token, rejects
 the callback if the returned `unionId` does not match the pending actor, then stores the verified
 access/refresh token in `TokenVault` before invoking the completion callback used to resume the
-pending session. The configured `OAUTH_REDIRECT_URI` must point at `/oauth/callback` on a public HTTPS
-URL or local tunnel for browser-based manual validation.
+pending session. Runtime startup uses `SQLitePendingAuthStore`, so authorization links that were sent
+before a process restart remain valid until their persisted expiry. The configured
+`OAUTH_REDIRECT_URI` must point at `/oauth/callback` on a public HTTPS URL or local tunnel for
+browser-based manual validation.
 
 `src.capabilities.Authorizer` is the execution-time authorization gate for capability requirements.
 For OBO requirements it checks `TokenVault.get_valid(...)`, uses DingTalk silent refresh when needed,

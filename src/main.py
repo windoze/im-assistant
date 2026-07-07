@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 logger = get_logger("im_assistant")
 ASSISTANT_SYSTEM_PROMPT = "你是企业内 AI 助手。请简洁、准确地回答用户问题。"
+DINGTALK_PLATFORM = "dingtalk"
 
 
 class ReplySender(Protocol):
@@ -48,6 +49,26 @@ class SessionRouter(Protocol):
 
     async def get_or_create_for_event(self, event: InboundEvent) -> SessionRouteResult:
         """Return the persistent Session route for one inbound event."""
+
+
+class InboundIdempotencyStore(Protocol):
+    """Store surface used to skip duplicate inbound platform messages."""
+
+    async def try_claim_inbound_message(
+        self,
+        *,
+        platform: str,
+        msg_id: str,
+        conversation_id: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> bool:
+        """Claim one inbound message id before processing."""
+
+    async def mark_inbound_message_processed(self, *, platform: str, msg_id: str) -> object:
+        """Mark a claimed inbound message as processed."""
+
+    async def release_inbound_message_claim(self, *, platform: str, msg_id: str) -> bool:
+        """Release a failed inbound message claim."""
 
 
 class AgentRunner(Protocol):
@@ -92,6 +113,22 @@ class PendingInteractionStore(Protocol):
 
     async def get_session(self, session_id: str) -> SessionRecord | None:
         """Return a persisted Session by id."""
+
+
+class SessionRecoveryStore(PendingInteractionStore, Protocol):
+    """Store surface needed to normalize persisted session state after restart."""
+
+    async def list_sessions(self) -> Sequence[SessionRecord]:
+        """Return all persisted Sessions."""
+
+    async def get_pending_interaction_for_session(
+        self,
+        session_id: str,
+    ) -> PendingInteractionRecord | None:
+        """Return the active pending interaction for a Session."""
+
+    async def upsert_session(self, record: SessionRecord) -> SessionRecord:
+        """Persist a recovered Session state."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +234,35 @@ async def schedule_persisted_interaction_timeouts(
         )
 
 
+async def recover_persisted_session_state(store: SessionRecoveryStore) -> None:
+    """Normalize persisted Session states after a process restart."""
+
+    for session in await store.list_sessions():
+        pending = await store.get_pending_interaction_for_session(session.session_id)
+        target_state = (
+            "AwaitingInteraction" if pending is not None else _recoverable_idle_state(session.state)
+        )
+        target_context = _recovered_session_context(session.context, pending)
+        if target_state == session.state and target_context == dict(session.context):
+            continue
+        await store.upsert_session(
+            replace(
+                session,
+                state=target_state,
+                context=target_context,
+            )
+        )
+        logger.info(
+            "session_state_recovered",
+            extra={
+                "session_id": session.session_id,
+                "previous_state": session.state,
+                "state": target_state,
+                "pending_interaction": None if pending is None else pending.correlation_id,
+            },
+        )
+
+
 async def main(*, start_stream: bool = False, config: AppConfig | None = None) -> None:
     """Start the assistant runtime."""
 
@@ -220,7 +286,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
     from src.infra.llm import LLMClient
-    from src.infra.oauth import PendingAuthStore
+    from src.infra.oauth import SQLitePendingAuthStore
     from src.infra.store import SQLiteStore
     from src.infra.token_vault import TokenVault
 
@@ -232,7 +298,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
         audit_logger = AuditLogger(store)
         session_manager = SessionManager(store, bot_id=app_config.dingtalk.robot_code)
         token_vault = TokenVault.from_config(store, app_config.token_vault)
-        pending_auth_store = PendingAuthStore()
+        pending_auth_store = SQLitePendingAuthStore(store)
 
         def capability_registry_for_session(session: Session):
             user_id = session.actor.id if session.kind == "dm" else None
@@ -299,6 +365,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         timeout_scheduler=timeout_scheduler,
                         audit_logger=audit_logger,
                     )
+                    await recover_persisted_session_state(store)
                     await schedule_persisted_interaction_timeouts(store, timeout_scheduler)
 
                     async def process_event(event: InboundEvent) -> None:
@@ -309,6 +376,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                             agent_loop=agent_loop,
                             command_handler=command_registry,
                             interaction_timeout_scheduler=timeout_scheduler,
+                            idempotency_store=store,
                         )
 
                     inbox_dispatcher = SessionInboxDispatcher(process_event)
@@ -336,8 +404,71 @@ async def handle_inbound_event(
     agent_loop: AgentRunner | None = None,
     command_handler: CommandMessageHandler | None = None,
     interaction_timeout_scheduler: InteractionTimeoutScheduler | None = None,
+    idempotency_store: InboundIdempotencyStore | None = None,
 ) -> None:
     """Apply trigger rules and route a normalized DingTalk inbound event."""
+
+    if idempotency_store is None:
+        await _handle_inbound_event_once(
+            event,
+            outbound=outbound,
+            llm_client=llm_client,
+            session_manager=session_manager,
+            agent_loop=agent_loop,
+            command_handler=command_handler,
+            interaction_timeout_scheduler=interaction_timeout_scheduler,
+        )
+        return
+
+    claimed = await idempotency_store.try_claim_inbound_message(
+        platform=DINGTALK_PLATFORM,
+        msg_id=event.msg_id,
+        conversation_id=event.conversation_id,
+        metadata={
+            "conversation_type": event.conversation_type,
+            "sender_staff_id": event.sender_staff_id,
+        },
+    )
+    if not claimed:
+        logger.info(
+            "dingtalk_inbound_message_duplicate",
+            extra={"msg_id": event.msg_id, "conversation_id": event.conversation_id},
+        )
+        return
+
+    try:
+        await _handle_inbound_event_once(
+            event,
+            outbound=outbound,
+            llm_client=llm_client,
+            session_manager=session_manager,
+            agent_loop=agent_loop,
+            command_handler=command_handler,
+            interaction_timeout_scheduler=interaction_timeout_scheduler,
+        )
+    except Exception:
+        await idempotency_store.release_inbound_message_claim(
+            platform=DINGTALK_PLATFORM,
+            msg_id=event.msg_id,
+        )
+        raise
+    await idempotency_store.mark_inbound_message_processed(
+        platform=DINGTALK_PLATFORM,
+        msg_id=event.msg_id,
+    )
+
+
+async def _handle_inbound_event_once(
+    event: InboundEvent,
+    *,
+    outbound: ReplySender,
+    llm_client: TextCompleter | None = None,
+    session_manager: SessionRouter | None = None,
+    agent_loop: AgentRunner | None = None,
+    command_handler: CommandMessageHandler | None = None,
+    interaction_timeout_scheduler: InteractionTimeoutScheduler | None = None,
+) -> None:
+    """Process one normalized DingTalk inbound event after idempotency checks."""
 
     from src.adapters.dingtalk import (
         UNSUPPORTED_MESSAGE_REPLY,
@@ -524,6 +655,30 @@ def _reply_target_from_pending(
         open_conversation_id=_open_conversation_id_from_session(session),
         msg_id=f"pending:{_required_string(pending.correlation_id, 'pending.correlation_id')}",
     )
+
+
+def _recoverable_idle_state(state: str) -> str:
+    if state in {"RunningAgent", "AwaitingInteraction"}:
+        return "Idle"
+    return _required_string(state, "session.state")
+
+
+def _recovered_session_context(
+    context: Mapping[str, object],
+    pending: PendingInteractionRecord | None,
+) -> dict[str, object]:
+    recovered = dict(context)
+    if pending is None:
+        recovered.pop("pending_interaction", None)
+        return recovered
+    recovered["pending_interaction"] = {
+        "kind": pending.kind,
+        "correlation_id": pending.correlation_id,
+        "responder": pending.responder_id,
+        "expires_at": _to_utc(pending.expires_at).isoformat(),
+        "payload": dict(pending.payload),
+    }
+    return recovered
 
 
 def _session_from_record(session: SessionRecord, *, responder_id: str) -> Session:

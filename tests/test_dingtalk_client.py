@@ -135,6 +135,38 @@ async def test_api_post_uses_application_token_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_request_refetches_application_token_after_invalid_token_error() -> None:
+    token_requests = 0
+    api_tokens: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal token_requests
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            token_requests += 1
+            return httpx.Response(
+                200,
+                json={"accessToken": f"app-token-{token_requests}", "expireIn": 7200},
+            )
+
+        api_tokens.append(request.headers["x-acs-dingtalk-access-token"])
+        if len(api_tokens) == 1:
+            return httpx.Response(
+                401,
+                json={"code": "InvalidAccessToken", "message": "access_token expired"},
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        payload = await client.api_post("/v1.0/example", {"hello": "world"})
+
+    assert payload == {"ok": True}
+    assert token_requests == 2
+    assert api_tokens == ["app-token-1", "app-token-2"]
+
+
+@pytest.mark.asyncio
 async def test_api_get_uses_supplied_user_token_without_fetching_app_token() -> None:
     paths: list[str] = []
 

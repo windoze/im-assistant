@@ -589,23 +589,41 @@ class DingTalkClient:
         params: Mapping[str, Any] | None = None,
         use_user_token: str | None = None,
     ) -> Any:
-        access_token = await self._resolve_access_token(use_user_token)
-        try:
-            response = await self._http_client.request(
-                method,
-                self._build_url(path),
-                headers={TOKEN_HEADER: access_token},
-                json=json,
-                params=params,
-            )
-        except httpx.HTTPError:
-            logger.exception(
-                "dingtalk_api_request_failed",
-                extra={"method": method, "path": path},
-            )
-            raise
+        for attempt in range(2):
+            access_token = await self._resolve_access_token(use_user_token)
+            try:
+                response = await self._http_client.request(
+                    method,
+                    self._build_url(path),
+                    headers={TOKEN_HEADER: access_token},
+                    json=json,
+                    params=params,
+                )
+            except httpx.HTTPError:
+                logger.exception(
+                    "dingtalk_api_request_failed",
+                    extra={"method": method, "path": path},
+                )
+                raise
 
-        return _parse_response(response, method=method, path=path)
+            try:
+                return _parse_response(response, method=method, path=path)
+            except DingTalkAPIError as exc:
+                if use_user_token is None and attempt == 0 and _is_access_token_invalid_error(exc):
+                    await self._invalidate_cached_access_token(access_token)
+                    logger.warning(
+                        "dingtalk_access_token_invalid_retrying",
+                        extra={
+                            "method": method,
+                            "path": path,
+                            "status_code": exc.status_code,
+                            "errcode": exc.errcode,
+                            "errmsg": exc.errmsg,
+                        },
+                    )
+                    continue
+                raise
+        raise RuntimeError("unreachable DingTalk API retry state")
 
     async def _resolve_access_token(self, use_user_token: str | None) -> str:
         if use_user_token is not None:
@@ -614,6 +632,12 @@ class DingTalkClient:
                 raise ValueError("use_user_token must be a non-empty string when provided")
             return token
         return (await self.get_access_token()).access_token
+
+    async def _invalidate_cached_access_token(self, failed_token: str) -> None:
+        async with self._token_lock:
+            if self._cached_token is not None and self._cached_token.access_token == failed_token:
+                self._cached_token = None
+                self._refresh_after = 0.0
 
     def _build_url(self, path: str) -> str:
         if path.startswith(("http://", "https://")):
@@ -720,6 +744,29 @@ def _is_refresh_token_rejected(error: DingTalkAPIError) -> bool:
             "rejected",
             "unauthorized",
             "forbidden",
+        )
+    )
+
+
+def _is_access_token_invalid_error(error: DingTalkAPIError) -> bool:
+    details = f"{error.errcode or ''} {error.errmsg or ''}".lower()
+    if error.status_code == 401:
+        return True
+    if (
+        "access_token" not in details
+        and "access token" not in details
+        and "accesstoken" not in details
+    ):
+        return False
+    return any(
+        marker in details
+        for marker in (
+            "invalid",
+            "expired",
+            "expire",
+            "unauthorized",
+            "forbidden",
+            "401",
         )
     )
 

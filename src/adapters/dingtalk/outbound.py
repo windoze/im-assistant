@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -17,6 +18,8 @@ logger = get_logger(__name__)
 
 ReplyTransport = Literal["session_webhook", "openapi_oto", "openapi_group"]
 DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 10.0
+DEFAULT_OUTBOUND_MIN_INTERVAL_SECONDS = 0.2
+Sleep = Callable[[float], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +46,39 @@ class DingTalkReplyTarget:
 ReplyTarget = InboundMessage | UnsupportedInboundMessage | DingTalkReplyTarget
 
 
+class OutboundRateLimiter:
+    """Serialize outbound sends with a minimum interval between attempts."""
+
+    def __init__(
+        self,
+        min_interval_seconds: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Sleep = asyncio.sleep,
+    ) -> None:
+        self._min_interval_seconds = _non_negative_float(
+            min_interval_seconds,
+            "min_interval_seconds",
+        )
+        self._clock = clock
+        self._sleep = sleep
+        self._next_allowed_at = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        """Wait until the next outbound send is allowed."""
+
+        if self._min_interval_seconds == 0:
+            return
+        async with self._lock:
+            now = self._clock()
+            delay = max(self._next_allowed_at - now, 0.0)
+            if delay > 0:
+                await self._sleep(delay)
+                now = self._clock()
+            self._next_allowed_at = max(self._next_allowed_at, now) + self._min_interval_seconds
+
+
 class DingTalkOutbound:
     """Send replies back to the DingTalk conversation that produced an inbound event."""
 
@@ -52,6 +88,10 @@ class DingTalkOutbound:
         *,
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.time,
+        rate_limit_clock: Callable[[], float] = time.monotonic,
+        rate_limit_sleep: Sleep = asyncio.sleep,
+        min_interval_seconds: float = DEFAULT_OUTBOUND_MIN_INTERVAL_SECONDS,
+        rate_limiter: OutboundRateLimiter | None = None,
     ) -> None:
         self._client = client
         self._http_client = http_client or httpx.AsyncClient(
@@ -59,6 +99,11 @@ class DingTalkOutbound:
         )
         self._owns_http_client = http_client is None
         self._clock = clock
+        self._rate_limiter = rate_limiter or OutboundRateLimiter(
+            min_interval_seconds,
+            clock=rate_limit_clock,
+            sleep=rate_limit_sleep,
+        )
 
     async def __aenter__(self) -> DingTalkOutbound:
         """Return this outbound sender when used as an async context manager."""
@@ -79,6 +124,7 @@ class DingTalkOutbound:
     async def reply(self, inbound: ReplyTarget, text: str) -> ReplyResult:
         """Reply to a DingTalk inbound event using webhook first, then OpenAPI."""
 
+        await self._rate_limiter.wait()
         return await reply(
             inbound,
             text,
@@ -171,3 +217,9 @@ def _non_empty_text(value: str) -> str:
     if not isinstance(value, str) or value.strip() == "":
         raise ValueError("reply text must be a non-empty string")
     return value
+
+
+def _non_negative_float(value: float, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (float, int)) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative number")
+    return float(value)

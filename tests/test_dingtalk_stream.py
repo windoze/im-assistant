@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import ClassVar
 
@@ -323,6 +324,34 @@ async def test_stream_adapter_dispatches_unsupported_non_text_message() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_stream_adapter_reconnects_with_exponential_backoff() -> None:
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    ReconnectingStreamClient.instances = []
+    adapter = DingTalkStreamAdapter(
+        _config(),
+        _unused_on_message,
+        client_factory=ReconnectingStreamClient,
+        reconnect_initial_delay=0.5,
+        reconnect_max_delay=1.0,
+        sleep=sleep,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.start()
+
+    assert [client.started for client in ReconnectingStreamClient.instances] == [1, 1, 1]
+    assert sleeps == [0.5, 1.0]
+
+
+async def _unused_on_message(_message: InboundEvent) -> None:
+    return None
+
+
 class FakeStreamClient:
     """Minimal SDK-compatible client for adapter tests."""
 
@@ -339,3 +368,25 @@ class FakeStreamClient:
 
     async def start(self) -> None:
         self.started = True
+
+
+class ReconnectingStreamClient:
+    """Fake stream client that fails twice and then cancels the reconnect loop."""
+
+    instances: ClassVar[list[ReconnectingStreamClient]] = []
+
+    def __init__(self, credential: StreamCredential) -> None:
+        self.credential = credential
+        self.handlers: dict[str, ChatbotHandler] = {}
+        self.started = 0
+        self.index = len(self.instances)
+        self.instances.append(self)
+
+    def register_callback_handler(self, topic: str, handler: ChatbotHandler) -> None:
+        self.handlers[topic] = handler
+
+    async def start(self) -> None:
+        self.started += 1
+        if self.index < 2:
+            raise RuntimeError("stream disconnected")
+        raise asyncio.CancelledError

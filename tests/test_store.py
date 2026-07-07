@@ -10,6 +10,7 @@ import pytest
 
 from src.infra.store import (
     IdentityBindingRecord,
+    PendingAuthRecord,
     PendingInteractionRecord,
     SessionRecord,
     SQLiteStore,
@@ -36,6 +37,8 @@ async def test_initialize_creates_required_tables_idempotently(tmp_path) -> None
     assert {
         "sessions",
         "messages",
+        "inbound_messages",
+        "pending_auths",
         "pending_interactions",
         "identity_bindings",
         "audit_log",
@@ -100,6 +103,37 @@ async def test_store_supports_basic_crud_for_all_t10_tables(tmp_path) -> None:
             assistant_message,
         ]
 
+        assert await store.try_claim_inbound_message(
+            platform="dingtalk",
+            msg_id="msg-1",
+            conversation_id="conversation-1",
+            metadata={"source": "stream"},
+        )
+        assert not await store.try_claim_inbound_message(
+            platform="dingtalk",
+            msg_id="msg-1",
+            conversation_id="conversation-1",
+        )
+        claimed = await store.get_inbound_message(platform="dingtalk", msg_id="msg-1")
+        assert claimed is not None
+        assert claimed.status == "processing"
+        processed = await store.mark_inbound_message_processed(
+            platform="dingtalk",
+            msg_id="msg-1",
+        )
+        assert processed.status == "processed"
+
+        assert await store.try_claim_inbound_message(
+            platform="dingtalk",
+            msg_id="msg-retry",
+            conversation_id="conversation-1",
+        )
+        assert await store.release_inbound_message_claim(
+            platform="dingtalk",
+            msg_id="msg-retry",
+        )
+        assert await store.get_inbound_message(platform="dingtalk", msg_id="msg-retry") is None
+
         pending = await store.create_pending_interaction(
             PendingInteractionRecord(
                 correlation_id="confirm-1",
@@ -123,6 +157,22 @@ async def test_store_supports_basic_crud_for_all_t10_tables(tmp_path) -> None:
         assert resolved_pending.resolution == {"approved": True}
         assert resolved_pending.resolved_at == datetime(2030, 1, 1, 0, 1, tzinfo=UTC)
         assert await store.get_pending_interaction_for_session("session-1") is None
+
+        pending_auth = await store.create_pending_auth(
+            PendingAuthRecord(
+                nonce="nonce-1",
+                principal_id="principal-1",
+                actor_id="actor-2",
+                session_id="session-1",
+                service="calendar",
+                scopes=("calendar:read", "calendar:read"),
+                expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+            )
+        )
+        assert pending_auth.scopes == ("calendar:read",)
+        assert await store.get_pending_auth("nonce-1") == pending_auth
+        assert await store.consume_pending_auth("nonce-1") == pending_auth
+        assert await store.get_pending_auth("nonce-1") is None
 
         binding = await store.upsert_identity_binding(
             IdentityBindingRecord(

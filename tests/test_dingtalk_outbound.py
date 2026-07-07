@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from src.adapters.dingtalk.message import InboundMessage
-from src.adapters.dingtalk.outbound import reply
+from src.adapters.dingtalk.outbound import DingTalkOutbound, reply
 from src.infra.config import DingTalkConfig
 from src.infra.dingtalk_client import DingTalkClient
 
@@ -140,6 +140,45 @@ async def test_reply_falls_back_to_openapi_group_when_webhook_missing_expiry() -
     assert result.transport == "openapi_group"
     assert result.payload == {"messageId": "message-1"}
     assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/robot/groupMessages/send"]
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_outbound_rate_limits_consecutive_replies() -> None:
+    now = 0.0
+    sleeps: list[float] = []
+    webhook_requests: list[httpx.Request] = []
+
+    def rate_clock() -> float:
+        return now
+
+    async def rate_sleep(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    def webhook_handler(request: httpx.Request) -> httpx.Response:
+        webhook_requests.append(request)
+        return httpx.Response(200, json={"errcode": 0, "errmsg": "ok"})
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(webhook_handler)) as webhook_client,
+        httpx.AsyncClient(transport=httpx.MockTransport(_unexpected_request)) as api_http_client,
+    ):
+        client = DingTalkClient(_config(), http_client=api_http_client)
+        outbound = DingTalkOutbound(
+            client,
+            http_client=webhook_client,
+            clock=lambda: 1_000,
+            rate_limit_clock=rate_clock,
+            rate_limit_sleep=rate_sleep,
+            min_interval_seconds=0.5,
+        )
+
+        await outbound.reply(_inbound(), "first")
+        await outbound.reply(_inbound(), "second")
+
+    assert len(webhook_requests) == 2
+    assert sleeps == [0.5]
 
 
 def _unexpected_request(request: httpx.Request) -> httpx.Response:

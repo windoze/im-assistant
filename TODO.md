@@ -453,10 +453,18 @@
   - 已补充 `tests/test_audit.py` 覆盖 OBO 授权、confirm resolve/cancel 和指令执行三类可查询审计记录;README 已补充运行时审计契约。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_audit.py tests/test_authorizer.py tests/test_interrupt.py tests/test_commands.py tests/test_builtin_commands.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T36 `[TODO]` 错误恢复与鲁棒性
+## [DONE] T36 错误恢复与鲁棒性
 - Stream 断线自动重连(指数退避);消息按 `msg_id` 去重(幂等);access_token 失效重取;出站发消息限流(防刷屏)。
 - 会话状态 + pending interaction 进程重启后可从 SQLite 恢复(架构 §8.1)。
 - **验收**:杀掉进程重启,进行中的授权/确认能恢复;断网恢复后自动重连;重复消息不重复处理。
+- **完成记录(2026-07-07)**:
+  - 已新增 SQLite `inbound_messages` 幂等表与 `pending_auths` 持久化授权状态表,并提供 typed store 方法;重复 DingTalk `msg_id` 会在进入会话路由/agent loop 前跳过,失败处理会释放 claim 以便重试。
+  - 已新增 `SQLitePendingAuthStore` 并在 Stream 启动路径使用,OAuth 授权链接在进程重启后仍可通过持久化 nonce 完成 `/oauth/start`/`/oauth/callback` 单次消费。
+  - 已新增启动恢复逻辑:重启时将中断的 `RunningAgent` 会话恢复为 `Idle`,将仍有 pending interaction 的会话恢复为 `AwaitingInteraction` 并重建 `pending_interaction` context,清理无 pending row 的陈旧 context;既有 pending interaction timeout 继续从 SQLite 恢复调度。
+  - 已为 DingTalk Stream 增加断线自动重连与指数退避;为应用级 OpenAPI 调用增加 access_token 失效后清缓存、重取 token 并重试一次;为 `DingTalkOutbound` 增加串行出站限流。
+  - 已补充 README 说明重连、幂等、OAuth/pending interaction 重启恢复、token retry 和出站限流契约。
+  - 已补充测试覆盖 store CRUD、OAuth pending state 重启、重复 `msg_id` 跳过、会话状态恢复、Stream 重连退避、access_token 重取重试和出站限流。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_store.py tests/test_oauth.py tests/test_main.py tests/test_dingtalk_stream.py tests/test_dingtalk_client.py tests/test_dingtalk_outbound.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T37 `[TODO]` 不可信输入边界与可观测
 - 高敏感工具强制走 confirm/白名单(架构 §9),不依赖 LLM 自觉;在 Capability 上用 `sensitivity` 标记并由运行时强制。

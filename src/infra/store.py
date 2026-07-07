@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 SessionKind = Literal["dm", "group"]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 PendingInteractionStatus = Literal["pending", "resolved", "cancelled"]
+InboundMessageStatus = Literal["processing", "processed"]
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -71,6 +72,37 @@ CREATE INDEX IF NOT EXISTS idx_pending_interactions_session_status
 
 CREATE INDEX IF NOT EXISTS idx_pending_interactions_expires_at
     ON pending_interactions(expires_at);
+
+CREATE TABLE IF NOT EXISTS pending_auths (
+    nonce TEXT PRIMARY KEY,
+    principal_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    service TEXT NOT NULL,
+    scopes_json TEXT NOT NULL DEFAULT '[]',
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_auths_expires_at
+    ON pending_auths(expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_pending_auths_session_id
+    ON pending_auths(session_id);
+
+CREATE TABLE IF NOT EXISTS inbound_messages (
+    platform TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('processing', 'processed')),
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    first_seen_at TEXT NOT NULL,
+    processed_at TEXT,
+    PRIMARY KEY (platform, msg_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbound_messages_conversation_id
+    ON inbound_messages(conversation_id);
 
 CREATE TABLE IF NOT EXISTS identity_bindings (
     provider TEXT NOT NULL,
@@ -172,6 +204,33 @@ class PendingInteractionRecord:
     resolution: Mapping[str, Any] | None = None
     created_at: datetime | None = None
     resolved_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingAuthRecord:
+    """Persisted OAuth authorization nonce awaiting a browser callback."""
+
+    nonce: str
+    principal_id: str
+    actor_id: str
+    session_id: str
+    service: str
+    scopes: tuple[str, ...]
+    expires_at: datetime
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InboundMessageRecord:
+    """Idempotency marker for one normalized inbound platform message."""
+
+    platform: str
+    msg_id: str
+    conversation_id: str
+    status: InboundMessageStatus
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    first_seen_at: datetime | None = None
+    processed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +398,12 @@ class SQLiteStore:
         )
         return None if row is None else _row_to_session(row)
 
+    async def list_sessions(self) -> list[SessionRecord]:
+        """Return all persisted sessions in deterministic order."""
+
+        rows = await self._fetchall("SELECT * FROM sessions ORDER BY session_id", ())
+        return [_row_to_session(row) for row in rows]
+
     async def delete_session(self, session_id: str) -> bool:
         """Delete a session and cascade its message history."""
 
@@ -450,6 +515,108 @@ class SQLiteStore:
         )
         await db.commit()
         return cursor.rowcount
+
+    async def try_claim_inbound_message(
+        self,
+        *,
+        platform: str,
+        msg_id: str,
+        conversation_id: str,
+        metadata: Mapping[str, Any] | None = None,
+        first_seen_at: datetime | None = None,
+    ) -> bool:
+        """Claim one inbound message id before processing; return False for duplicates."""
+
+        timestamp = _format_datetime(first_seen_at or _utc_now())
+        db = await self._connection()
+        cursor = await db.execute(
+            """
+            INSERT OR IGNORE INTO inbound_messages (
+                platform,
+                msg_id,
+                conversation_id,
+                status,
+                metadata_json,
+                first_seen_at
+            )
+            VALUES (?, ?, ?, 'processing', ?, ?)
+            """,
+            (
+                _non_empty_string(platform, "platform"),
+                _non_empty_string(msg_id, "msg_id"),
+                _non_empty_string(conversation_id, "conversation_id"),
+                _encode_json_object(metadata or {}),
+                timestamp,
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def mark_inbound_message_processed(
+        self,
+        *,
+        platform: str,
+        msg_id: str,
+        processed_at: datetime | None = None,
+    ) -> InboundMessageRecord:
+        """Mark a claimed inbound message as fully processed."""
+
+        timestamp = _format_datetime(processed_at or _utc_now())
+        db = await self._connection()
+        cursor = await db.execute(
+            """
+            UPDATE inbound_messages
+            SET status = 'processed',
+                processed_at = ?
+            WHERE platform = ? AND msg_id = ? AND status = 'processing'
+            """,
+            (
+                timestamp,
+                _non_empty_string(platform, "platform"),
+                _non_empty_string(msg_id, "msg_id"),
+            ),
+        )
+        await db.commit()
+        if cursor.rowcount == 0:
+            raise StoreError(f"Inbound message claim is not active: {platform}/{msg_id}")
+        stored = await self.get_inbound_message(platform=platform, msg_id=msg_id)
+        if stored is None:
+            raise StoreError(f"Inbound message disappeared: {platform}/{msg_id}")
+        return stored
+
+    async def release_inbound_message_claim(self, *, platform: str, msg_id: str) -> bool:
+        """Release a failed in-flight claim so DingTalk can retry the message."""
+
+        db = await self._connection()
+        cursor = await db.execute(
+            """
+            DELETE FROM inbound_messages
+            WHERE platform = ? AND msg_id = ? AND status = 'processing'
+            """,
+            (
+                _non_empty_string(platform, "platform"),
+                _non_empty_string(msg_id, "msg_id"),
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+    async def get_inbound_message(
+        self,
+        *,
+        platform: str,
+        msg_id: str,
+    ) -> InboundMessageRecord | None:
+        """Return one inbound idempotency marker."""
+
+        row = await self._fetchone(
+            "SELECT * FROM inbound_messages WHERE platform = ? AND msg_id = ?",
+            (
+                _non_empty_string(platform, "platform"),
+                _non_empty_string(msg_id, "msg_id"),
+            ),
+        )
+        return None if row is None else _row_to_inbound_message(row)
 
     async def create_pending_interaction(
         self,
@@ -573,6 +740,84 @@ class SQLiteStore:
         if stored is None:
             raise StoreError(f"Pending interaction disappeared: {correlation_id}")
         return stored
+
+    async def create_pending_auth(self, record: PendingAuthRecord) -> PendingAuthRecord:
+        """Persist one OAuth state nonce for restart-safe consent flows."""
+
+        created_at = _format_datetime(record.created_at or _utc_now())
+        db = await self._connection()
+        await db.execute(
+            """
+            INSERT INTO pending_auths (
+                nonce,
+                principal_id,
+                actor_id,
+                session_id,
+                service,
+                scopes_json,
+                expires_at,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _non_empty_string(record.nonce, "nonce"),
+                _non_empty_string(record.principal_id, "principal_id"),
+                _non_empty_string(record.actor_id, "actor_id"),
+                _non_empty_string(record.session_id, "session_id"),
+                _non_empty_string(record.service, "service"),
+                _encode_json_array(_normalize_scopes(record.scopes)),
+                _format_datetime(record.expires_at),
+                created_at,
+            ),
+        )
+        await db.commit()
+        stored = await self.get_pending_auth(record.nonce)
+        if stored is None:
+            raise StoreError(f"Pending auth was not stored: {record.nonce}")
+        return stored
+
+    async def get_pending_auth(self, nonce: str) -> PendingAuthRecord | None:
+        """Return a pending OAuth state nonce without consuming it."""
+
+        row = await self._fetchone(
+            "SELECT * FROM pending_auths WHERE nonce = ?",
+            (_non_empty_string(nonce, "nonce"),),
+        )
+        return None if row is None else _row_to_pending_auth(row)
+
+    async def consume_pending_auth(self, nonce: str) -> PendingAuthRecord | None:
+        """Atomically consume and return a pending OAuth state nonce."""
+
+        normalized_nonce = _non_empty_string(nonce, "nonce")
+        db = await self._connection()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            async with db.execute(
+                "SELECT * FROM pending_auths WHERE nonce = ?",
+                (normalized_nonce,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                await db.commit()
+                return None
+            await db.execute("DELETE FROM pending_auths WHERE nonce = ?", (normalized_nonce,))
+            await db.commit()
+            return _row_to_pending_auth(row)
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def delete_pending_auth(self, nonce: str) -> bool:
+        """Delete a pending OAuth state nonce without consuming it as completed."""
+
+        db = await self._connection()
+        cursor = await db.execute(
+            "DELETE FROM pending_auths WHERE nonce = ?",
+            (_non_empty_string(nonce, "nonce"),),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
     async def upsert_identity_binding(
         self,
@@ -868,6 +1113,33 @@ def _row_to_pending_interaction(row: aiosqlite.Row) -> PendingInteractionRecord:
     )
 
 
+def _row_to_pending_auth(row: aiosqlite.Row) -> PendingAuthRecord:
+    return PendingAuthRecord(
+        nonce=row["nonce"],
+        principal_id=row["principal_id"],
+        actor_id=row["actor_id"],
+        session_id=row["session_id"],
+        service=row["service"],
+        scopes=tuple(_decode_json_string_array(row["scopes_json"])),
+        expires_at=_parse_datetime(row["expires_at"]),
+        created_at=_parse_datetime(row["created_at"]),
+    )
+
+
+def _row_to_inbound_message(row: aiosqlite.Row) -> InboundMessageRecord:
+    return InboundMessageRecord(
+        platform=row["platform"],
+        msg_id=row["msg_id"],
+        conversation_id=row["conversation_id"],
+        status=_inbound_message_status(row["status"]),
+        metadata=_decode_json_object(row["metadata_json"]),
+        first_seen_at=_parse_datetime(row["first_seen_at"]),
+        processed_at=(
+            None if row["processed_at"] is None else _parse_datetime(row["processed_at"])
+        ),
+    )
+
+
 def _row_to_identity_binding(row: aiosqlite.Row) -> IdentityBindingRecord:
     return IdentityBindingRecord(
         provider=row["provider"],
@@ -932,7 +1204,7 @@ def _decode_json_string_array(value: str) -> list[str]:
 
 
 def _normalize_scopes(scopes: Sequence[str]) -> list[str]:
-    return [_non_empty_string(scope, "scope") for scope in scopes]
+    return list(dict.fromkeys(_non_empty_string(scope, "scope") for scope in scopes))
 
 
 def _pending_interaction_kind(kind: str) -> str:
@@ -958,6 +1230,15 @@ def _pending_interaction_terminal_status(status: str) -> PendingInteractionStatu
     if normalized == "pending":
         raise ValueError("`status` must be a terminal pending-interaction status")
     return normalized
+
+
+def _inbound_message_status(status: str) -> InboundMessageStatus:
+    normalized = _non_empty_string(status, "status")
+    if normalized == "processing":
+        return "processing"
+    if normalized == "processed":
+        return "processed"
+    raise ValueError("`status` must be 'processing' or 'processed'")
 
 
 def _non_empty_string(value: str, field_name: str) -> str:

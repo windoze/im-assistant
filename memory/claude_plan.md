@@ -14,37 +14,39 @@ I will follow `TODO.md` as the authoritative source of work and complete exactly
 
 ## Current Status
 
-Selected first incomplete task: `T35 审计日志` (now marked `[DONE]` in `TODO.md`).
+Selected first incomplete task: `T36 错误恢复与鲁棒性`.
 
-## T35 Scope
+## T36 Scope
 
-1. Inspect the existing SQLite `audit_log` schema and helper methods.
-2. Add `infra/audit.py` with a typed audit logger that writes who/representing-whom/when/scope/action metadata to `audit_log`.
-3. Wire audit records into:
-   - OBO authorization/token use in `Authorizer`.
-   - Interrupt decisions for confirm/cancel/timeout/new-message cancellation.
-   - Slash command dispatch and builtin command side effects.
-4. Add tests proving OBO reads, confirm/cancel decisions, and command execution all leave queryable audit records.
-5. Run formatting, linting, and tests in the repository’s established order.
-6. Mark T35 `[DONE]`, update its completion record, and commit all task changes.
+1. Inspect current Stream, outbound messaging, access-token, session, store, and interrupt persistence code.
+2. Implement Stream reconnect with exponential backoff.
+3. Implement inbound message idempotency by `msg_id`.
+4. Ensure access-token invalidation triggers a fresh token and retry for outbound/API calls that fail due to token expiry.
+5. Add outbound message rate limiting to prevent rapid repeated sends.
+6. Restore session state and pending interactions from SQLite during process startup.
+7. Add or update tests for reconnect, deduplication, token refresh retry, rate limiting, and restart recovery.
+8. Run formatting, linting, and relevant/full tests as required.
+9. Mark T36 `[DONE]` with a completion record and commit all task changes.
 
 ## Current Progress
 
-Implemented the T35 audit layer and initial wiring:
+Implemented the T36 robustness layer:
 
-1. Added `src/infra/audit.py` with typed audit helpers for OBO authorization, interaction decisions, and command dispatch.
-2. Wired `Authorizer` to audit OBO grant / needs-consent / denial decisions without storing token material.
-3. Wired `SessionInterruptManager` to audit terminal confirm/consent resolve and cancel decisions.
-4. Wired `CommandRegistry` and the built-in registry factory to audit deterministic command outcomes.
-5. Wired Stream startup to share one `AuditLogger` across Authorizer, interrupt manager, and command registry.
-6. Added integration tests in `tests/test_audit.py` and documented the audit contract in `README.md`.
+1. Added SQLite persistence for inbound message idempotency and pending OAuth authorization state.
+2. Added restart recovery for persisted Session state and pending interaction context.
+3. Wired runtime startup to use persistent OAuth pending state, recover sessions, restore pending timeouts, and skip duplicate inbound `msg_id`s.
+4. Added Stream reconnect with exponential backoff.
+5. Added app access-token invalidation retry for DingTalk OpenAPI calls.
+6. Added outbound reply rate limiting.
+7. Added focused tests for persistence, OAuth restart, inbound deduplication, session recovery, Stream reconnect, token retry, and outbound rate limiting.
+8. Updated README with the new recovery/idempotency/retry guarantees.
 
-Validation completed:
+Validation so far:
 
 1. `.venv/bin/ruff format .`
 2. `.venv/bin/ruff check .`
-3. `.venv/bin/pytest tests/test_audit.py tests/test_authorizer.py tests/test_interrupt.py tests/test_commands.py tests/test_builtin_commands.py -q`
+3. `.venv/bin/pytest tests/test_store.py tests/test_oauth.py tests/test_main.py tests/test_dingtalk_stream.py tests/test_dingtalk_client.py tests/test_dingtalk_outbound.py -q`
 4. `.venv/bin/pytest -q`
 5. `python -m src.main`
 
-`TODO.md` has been updated to mark T35 `[DONE]` with the completion record. Next: commit all task changes.
+`TODO.md` has been updated to mark T36 `[DONE]` with its completion record. Next step: commit T36.

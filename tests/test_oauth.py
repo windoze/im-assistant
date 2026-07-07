@@ -35,10 +35,11 @@ from src.infra.oauth import (
     PendingAuthExpired,
     PendingAuthNotFound,
     PendingAuthStore,
+    SQLitePendingAuthStore,
     build_authorization_url,
     create_oauth_app,
 )
-from src.infra.store import SQLiteStore
+from src.infra.store import SessionRecord, SQLiteStore
 from src.infra.token_vault import TokenVault, UserToken
 
 
@@ -90,6 +91,45 @@ async def test_pending_auth_store_consumes_nonce_once_and_expires() -> None:
     now = now + timedelta(seconds=1)
     with pytest.raises(PendingAuthExpired):
         await store.consume("nonce-3")
+
+
+@pytest.mark.asyncio
+async def test_sqlite_pending_auth_store_survives_restart(tmp_path) -> None:
+    """OAuth state should remain valid after recreating the SQLite-backed pending store."""
+
+    database_path = tmp_path / "assistant.db"
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+    async with SQLiteStore(database_path) as sqlite_store:
+        await sqlite_store.initialize()
+        await sqlite_store.upsert_session(
+            SessionRecord(
+                session_id="session-1",
+                conversation_id="conversation-1",
+                kind="dm",
+                bot_id="robot-code",
+                principal_id="user:user-1",
+                actor_id="user-1",
+            )
+        )
+        pending_store = SQLitePendingAuthStore(sqlite_store, now_factory=lambda: now)
+        pending = await pending_store.create(
+            nonce="nonce-1",
+            principal="user:user-1",
+            actor="union-1",
+            session="session-1",
+            service="calendar",
+            scopes=("calendar:read", "calendar:read"),
+        )
+
+    async with SQLiteStore(database_path) as sqlite_store:
+        await sqlite_store.initialize()
+        restarted_store = SQLitePendingAuthStore(sqlite_store, now_factory=lambda: now)
+
+        assert await restarted_store.get("nonce-1") == pending
+        assert await restarted_store.consume("nonce-1") == pending
+        with pytest.raises(PendingAuthNotFound):
+            await restarted_store.consume("nonce-1")
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from aiohttp import web
 from src.infra.config import AppConfig, DingTalkConfig, OAuthConfig
 from src.infra.dingtalk_client import TOKEN_HEADER, DingTalkAPIError, parse_dingtalk_response
 from src.infra.log import get_logger
+from src.infra.store import PendingAuthRecord
 from src.infra.token_vault import UserToken
 
 logger = get_logger(__name__)
@@ -59,6 +60,22 @@ class OAuthTokenVault(Protocol):
         expires_at: datetime | None,
     ) -> UserToken:
         """Persist verified user-level token material."""
+
+
+class PendingAuthPersistence(Protocol):
+    """Persistent store surface for restart-safe OAuth pending state."""
+
+    async def create_pending_auth(self, record: PendingAuthRecord) -> PendingAuthRecord:
+        """Persist one pending OAuth state nonce."""
+
+    async def get_pending_auth(self, nonce: str) -> PendingAuthRecord | None:
+        """Return one pending OAuth state nonce without consuming it."""
+
+    async def consume_pending_auth(self, nonce: str) -> PendingAuthRecord | None:
+        """Atomically consume and return one pending OAuth state nonce."""
+
+    async def delete_pending_auth(self, nonce: str) -> bool:
+        """Delete one pending OAuth state nonce."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +214,98 @@ class PendingAuthStore:
         expired = [nonce for nonce, pending in self._pending.items() if _is_expired(pending, now)]
         for nonce in expired:
             del self._pending[nonce]
+
+
+class SQLitePendingAuthStore:
+    """SQLite-backed store for OAuth nonces that must survive process restart."""
+
+    def __init__(
+        self,
+        store: PendingAuthPersistence,
+        *,
+        ttl_seconds: int = DEFAULT_PENDING_AUTH_TTL_SECONDS,
+        now_factory: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._store = store
+        self._ttl = timedelta(seconds=_positive_int(ttl_seconds, "ttl_seconds"))
+        self._now_factory = now_factory
+
+    async def create(
+        self,
+        *,
+        nonce: str,
+        principal: str,
+        actor: str | None = None,
+        session: str,
+        service: str,
+        scopes: Sequence[str],
+        expires_at: datetime | None = None,
+    ) -> PendingAuth:
+        """Create one persistent pending authorization nonce."""
+
+        now = _to_utc(self._now_factory())
+        pending = _pending_auth(
+            nonce=nonce,
+            principal=principal,
+            actor=actor,
+            session=session,
+            service=service,
+            scopes=scopes,
+            expires_at=_to_utc(expires_at) if expires_at is not None else now + self._ttl,
+        )
+        if pending.expires_at <= now:
+            raise ValueError("expires_at must be in the future")
+
+        existing = await self._store.get_pending_auth(pending.nonce)
+        if existing is not None:
+            existing_pending = _pending_from_record(existing)
+            if _is_expired(existing_pending, now):
+                await self._store.delete_pending_auth(existing_pending.nonce)
+            else:
+                raise ValueError(f"pending OAuth nonce already exists: {pending.nonce}")
+
+        stored = await self._store.create_pending_auth(
+            PendingAuthRecord(
+                nonce=pending.nonce,
+                principal_id=pending.principal_id,
+                actor_id=pending.actor_id,
+                session_id=pending.session_id,
+                service=pending.service,
+                scopes=pending.scopes,
+                expires_at=pending.expires_at,
+            )
+        )
+        return _pending_from_record(stored)
+
+    async def get(self, nonce: str) -> PendingAuth | None:
+        """Return a persistent authorization nonce without consuming it."""
+
+        normalized_nonce = _non_empty_string(nonce, "nonce")
+        record = await self._store.get_pending_auth(normalized_nonce)
+        if record is None:
+            return None
+        pending = _pending_from_record(record)
+        if _is_expired(pending, _to_utc(self._now_factory())):
+            await self._store.delete_pending_auth(normalized_nonce)
+            return None
+        return pending
+
+    async def consume(self, nonce: str) -> PendingAuth:
+        """Consume and return a persistent authorization nonce exactly once."""
+
+        normalized_nonce = _non_empty_string(nonce, "nonce")
+        record = await self._store.consume_pending_auth(normalized_nonce)
+        if record is None:
+            raise PendingAuthNotFound(f"Unknown OAuth state nonce: {normalized_nonce}")
+        pending = _pending_from_record(record)
+        if _is_expired(pending, _to_utc(self._now_factory())):
+            raise PendingAuthExpired(f"Expired OAuth state nonce: {normalized_nonce}")
+        return pending
+
+    async def discard(self, nonce: str) -> bool:
+        """Remove a persistent authorization nonce without completing it."""
+
+        return await self._store.delete_pending_auth(_non_empty_string(nonce, "nonce"))
 
 
 class DingTalkOAuthClient:
@@ -575,6 +684,44 @@ def _normalize_scopes(scopes: Sequence[str]) -> tuple[str, ...]:
     if isinstance(scopes, (str, bytes)):
         raise ValueError("scopes must be a sequence of strings")
     return tuple(dict.fromkeys(_non_empty_string(scope, "scope") for scope in scopes))
+
+
+def _pending_auth(
+    *,
+    nonce: str,
+    principal: str,
+    actor: str | None,
+    session: str,
+    service: str,
+    scopes: Sequence[str],
+    expires_at: datetime,
+) -> PendingAuth:
+    normalized_principal = _non_empty_string(principal, "principal")
+    return PendingAuth(
+        nonce=_non_empty_string(nonce, "nonce"),
+        principal_id=normalized_principal,
+        actor_id=(
+            _non_empty_string(actor, "actor")
+            if actor is not None
+            else _actor_from_principal(normalized_principal)
+        ),
+        session_id=_non_empty_string(session, "session"),
+        service=_non_empty_string(service, "service"),
+        scopes=_normalize_scopes(scopes),
+        expires_at=_to_utc(expires_at),
+    )
+
+
+def _pending_from_record(record: PendingAuthRecord) -> PendingAuth:
+    return PendingAuth(
+        nonce=record.nonce,
+        principal_id=record.principal_id,
+        actor_id=record.actor_id,
+        session_id=record.session_id,
+        service=record.service,
+        scopes=record.scopes,
+        expires_at=_to_utc(record.expires_at),
+    )
 
 
 def _actor_from_principal(principal: str) -> str:

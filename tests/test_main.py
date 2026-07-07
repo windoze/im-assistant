@@ -29,6 +29,7 @@ from src.main import (
     InteractionTimeoutScheduler,
     handle_inbound_event,
     main,
+    recover_persisted_session_state,
     schedule_persisted_interaction_timeouts,
 )
 
@@ -133,6 +134,47 @@ async def test_handle_inbound_event_uses_agent_loop_for_routed_text_message() ->
 
     assert agent_loop.calls == [(routed_session, "hello", "user-1", "msg-1")]
     assert outbound.replies == [(event, "loop reply")]
+
+
+@pytest.mark.asyncio
+async def test_handle_inbound_event_skips_duplicate_msg_id(tmp_path) -> None:
+    outbound = FakeOutbound()
+    event = _text_event(msg_id="msg-duplicate")
+    routed_session = _session()
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=routed_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("loop reply")
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+
+        await handle_inbound_event(
+            event,
+            outbound=outbound,
+            session_manager=session_manager,
+            agent_loop=agent_loop,
+            idempotency_store=store,
+        )
+        await handle_inbound_event(
+            event,
+            outbound=outbound,
+            session_manager=session_manager,
+            agent_loop=agent_loop,
+            idempotency_store=store,
+        )
+
+        marker = await store.get_inbound_message(platform="dingtalk", msg_id="msg-duplicate")
+
+    assert agent_loop.calls == [(routed_session, "hello", "user-1", "msg-duplicate")]
+    assert session_manager.events == [event]
+    assert outbound.replies == [(event, "loop reply")]
+    assert marker is not None
+    assert marker.status == "processed"
 
 
 @pytest.mark.asyncio
@@ -457,6 +499,79 @@ async def test_persisted_pending_interaction_timeout_is_scheduled_after_restart(
     assert target.open_conversation_id == "open-conversation-1"
     assert target.session_webhook == ""
     assert target.msg_id == "pending:confirm-recovered"
+
+
+@pytest.mark.asyncio
+async def test_recover_persisted_session_state_after_restart(tmp_path) -> None:
+    """Restart recovery should restore pending contexts and clear interrupted runs."""
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        await store.upsert_session(
+            SessionRecord(
+                session_id="running-session",
+                conversation_id="conversation-running",
+                kind="dm",
+                bot_id="robot-code",
+                principal_id="user:user-1",
+                actor_id="user-1",
+                state="RunningAgent",
+            )
+        )
+        await store.upsert_session(
+            SessionRecord(
+                session_id="stale-awaiting-session",
+                conversation_id="conversation-stale",
+                kind="dm",
+                bot_id="robot-code",
+                principal_id="user:user-1",
+                actor_id="user-1",
+                state="AwaitingInteraction",
+                context={"pending_interaction": {"correlation_id": "missing"}},
+            )
+        )
+        await store.upsert_session(
+            SessionRecord(
+                session_id="pending-session",
+                conversation_id="conversation-pending",
+                kind="dm",
+                bot_id="robot-code",
+                principal_id="user:user-1",
+                actor_id="user-1",
+                state="Idle",
+            )
+        )
+        await store.create_pending_interaction(
+            PendingInteractionRecord(
+                correlation_id="confirm-recovered",
+                session_id="pending-session",
+                kind="confirm",
+                responder_id="user-1",
+                expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+                payload={"action": "发送钉钉通知"},
+            )
+        )
+
+        await recover_persisted_session_state(store)
+
+        running = await store.get_session("running-session")
+        stale = await store.get_session("stale-awaiting-session")
+        pending = await store.get_session("pending-session")
+
+    assert running is not None
+    assert running.state == "Idle"
+    assert stale is not None
+    assert stale.state == "Idle"
+    assert "pending_interaction" not in stale.context
+    assert pending is not None
+    assert pending.state == "AwaitingInteraction"
+    assert pending.context["pending_interaction"] == {
+        "kind": "confirm",
+        "correlation_id": "confirm-recovered",
+        "responder": "user-1",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+        "payload": {"action": "发送钉钉通知"},
+    }
 
 
 @pytest.mark.asyncio
