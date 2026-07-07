@@ -415,10 +415,18 @@
   - 已补充单测覆盖注册表列出、与 capability registry 分离、参数解析、会话模式限制、越权拒绝、管理员授权通过和注入消息进入后续 AgentLoop 历史。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T33 `[TODO]` 首批指令
+## [DONE] T33 首批指令
 - 实现:`/help`(列可用能力/指令)、`/reset`(清会话上下文)、`/whoami`(查身份绑定/授权状态)、`/connect <service>`(主动触发 OBO 预热授权)、`/disconnect <service>`(清 TokenVault)、`/cancel`(主动取消当前 pending 确认)。
 - 默认完全跳过 AI;需影响会话的用 `inject_message`。
 - **验收**:每条指令按预期工作;`/connect calendar` 能主动走授权;`/reset` 后上下文清空。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/core/builtin_commands.py` 与 `create_builtin_command_registry(...)`,注册 `/help`、`/reset`、`/whoami`、`/connect <service>`、`/disconnect <service>`、`/cancel` 六个确定性内置指令,全部经 `CommandRegistry` 鉴权/参数校验后执行,默认不进入 Claude。
+  - `/help` 会按当前 Session/actor 列出可用指令和通过 `can_use` 可见的能力;`/reset` 删除当前 Session 的持久化消息历史并清理非运行时上下文;`/whoami` 查询 DingTalk identity binding 和已知 OBO 服务的 TokenVault 授权状态;`/disconnect` 清除指定服务的用户授权。
+  - `/connect calendar` 通过既有 `Authorizer` 汇总可见 OBO capability 的 calendar scopes,创建 `PendingAuth`、统一的 `consent` `SessionInterrupt` 和 timeout 调度,返回 `/oauth/start?nonce=...` 授权链接;已有有效授权时直接报告已连接。
+  - `/cancel` 已接入 AwaitingInteraction 优先路径,在 pending 状态下作为主动取消命令处理,通过 AgentLoop cancellation 记录 `command_cancelled` 并发送运行时取消通告,不落入普通新消息 supersede 分支且不调用 LLM。
+  - 已将 Stream 启动路径改为共享 `SessionInterruptManager`,并用内置指令注册表替换空 `CommandRegistry`;README 已同步内置指令行为。
+  - 已补充单测覆盖六条指令、`/connect` 授权预热/timeout 调度、`/reset` 历史清空、`/cancel` pending 路由和既有命令注册表行为。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_builtin_commands.py tests/test_commands.py tests/test_main.py tests/test_agent_loop.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T34 `[TODO]` 【REVIEW】M6 指令通道审阅
 - 审阅 T31–T33:三岔口优先级正确;指令表与工具表边界清晰;鉴权到位;`/connect`/`/disconnect` 与 TokenVault 一致;注入 API 是否是唯一影响 AI 的途径。

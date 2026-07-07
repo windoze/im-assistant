@@ -268,6 +268,34 @@ async def test_pending_interaction_route_has_priority_over_slash_command() -> No
 
 
 @pytest.mark.asyncio
+async def test_cancel_command_handles_pending_interaction_without_generic_supersede() -> None:
+    outbound = FakeOutbound()
+    event = _text_event(text="/cancel", msg_id="msg-cancel")
+    awaiting_session = _session(state="AwaitingInteraction")
+    session_manager = FakeSessionManager(
+        SessionRouteResult(
+            session=awaiting_session,
+            created=False,
+            should_send_welcome=False,
+        )
+    )
+    agent_loop = FakeAgentLoop("unused")
+    command_handler = FakeCommandHandler("已取消:用户主动取消，[发送钉钉通知] 未执行。")
+
+    await handle_inbound_event(
+        event,
+        outbound=outbound,
+        session_manager=session_manager,
+        agent_loop=agent_loop,
+        command_handler=command_handler,
+    )
+
+    assert agent_loop.cancellations == []
+    assert command_handler.calls == [(awaiting_session, "/cancel", event)]
+    assert outbound.replies == [(event, "已取消:用户主动取消，[发送钉钉通知] 未执行。")]
+
+
+@pytest.mark.asyncio
 async def test_interaction_timeout_scheduler_sends_system_notice() -> None:
     outbound = FakeOutbound()
     event = _text_event()

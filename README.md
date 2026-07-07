@@ -100,9 +100,13 @@ Before any text message enters the agent loop, `src.core.router.classify_inbound
 deterministically checks for an active pending interaction, then slash-command text beginning with `/`,
 and only sends ordinary messages to Claude. Slash commands are dispatched through the independent
 `src.core.commands.CommandRegistry`, which checks command availability, actor role requirements, and
-argument specs before calling a deterministic handler. Commands can affect later AI turns only by calling
-the command injection API, which appends explicit command-originated history to the Session; concrete
-built-in commands are added by the next M6 task.
+argument specs before calling a deterministic handler. Built-ins are registered by
+`src.core.create_builtin_command_registry(...)`: `/help` lists visible commands and capabilities,
+`/reset` clears persisted chat history, `/whoami` reports DingTalk identity binding and OBO grant
+status, `/connect <service>` pre-creates the same consent flow used by OBO tools,
+`/disconnect <service>` revokes a TokenVault grant, and `/cancel` cancels the current pending
+confirm/consent without invoking Claude. Commands can affect later AI turns only by calling the
+command injection API, which appends explicit command-originated history to the Session.
 
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and

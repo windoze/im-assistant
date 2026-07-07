@@ -16,6 +16,17 @@ from src.core.agent_loop import (
     PendingInteractionInfo,
     ToolExecutor,
 )
+from src.core.builtin_commands import (
+    BuiltinCommandAuthorizer,
+    BuiltinCommandInteractionCanceller,
+    BuiltinCommandInterruptManager,
+    BuiltinCommandServices,
+    BuiltinCommandStore,
+    BuiltinCommandTimeoutScheduler,
+    BuiltinCommandTokenVault,
+    builtin_commands,
+    create_builtin_command_registry,
+)
 from src.core.commands import (
     COMMAND_ARGS_INVALID_REPLY,
     COMMAND_FORBIDDEN_REPLY,
@@ -70,6 +81,13 @@ __all__ = [
     "AgentLoopToolError",
     "AgentRunResult",
     "BotIdentity",
+    "BuiltinCommandAuthorizer",
+    "BuiltinCommandInteractionCanceller",
+    "BuiltinCommandInterruptManager",
+    "BuiltinCommandServices",
+    "BuiltinCommandStore",
+    "BuiltinCommandTimeoutScheduler",
+    "BuiltinCommandTokenVault",
     "COMMAND_ARGS_INVALID_REPLY",
     "COMMAND_FORBIDDEN_REPLY",
     "COMMAND_REQUIRES_SESSION_REPLY",
@@ -120,5 +138,7 @@ __all__ = [
     "ToolExecutor",
     "UNKNOWN_COMMAND_REPLY",
     "classify_inbound_message",
+    "builtin_commands",
+    "create_builtin_command_registry",
     "inject_message",
 ]

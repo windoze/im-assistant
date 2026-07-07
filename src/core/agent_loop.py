@@ -39,7 +39,11 @@ logger = get_logger(__name__)
 DEFAULT_HISTORY_LIMIT = 20
 DEFAULT_MAX_TOOL_ITERATIONS = 8
 AgentRunStatus = Literal["completed", "awaiting_interaction"]
-InteractionCancellationReason = Literal["superseded_by_new_message", "timeout"]
+InteractionCancellationReason = Literal[
+    "superseded_by_new_message",
+    "timeout",
+    "command_cancelled",
+]
 
 
 class AgentLoopStateError(RuntimeError):
@@ -1268,11 +1272,15 @@ def _cancellation_notice_text(
         action = _pending_action_label(pending)
         if reason == "timeout":
             return f"已取消:确认超时，[{action}] 未执行。"
+        if reason == "command_cancelled":
+            return f"已取消:用户主动取消，[{action}] 未执行。"
         return f"已取消:未确认，[{action}] 未执行。"
     if pending.kind == "consent":
         service = _pending_service_label(pending)
         if reason == "timeout":
             return f"已取消:授权超时，[{service}] 授权未完成。"
+        if reason == "command_cancelled":
+            return f"已取消:用户主动取消，[{service}] 授权未完成。"
         return f"已取消:未完成授权，[{service}] 授权未完成。"
     raise AgentLoopStateError(f"Unsupported pending interaction kind: {pending.kind}")
 

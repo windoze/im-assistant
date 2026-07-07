@@ -127,6 +127,7 @@ class CommandContext:
     args: tuple[str, ...]
     args_text: str
     event: object
+    registry: CommandRegistry | None = field(default=None, repr=False, compare=False)
     _store: CommandStore | None = field(default=None, repr=False, compare=False)
 
     async def inject_message(self, text: str) -> MessageRecord:
@@ -191,6 +192,16 @@ class CommandRegistry:
 
         return tuple(self._commands[name] for name in sorted(self._commands))
 
+    def list_available_commands(self, session: Session) -> tuple[Command, ...]:
+        """List commands the current actor can execute in this Session."""
+
+        return tuple(
+            command
+            for command in self.list_commands()
+            if session.kind in command.available_in
+            and self._actor_has_required_role(session, command.requires_role)
+        )
+
     async def inject_message(
         self,
         session: Session,
@@ -244,6 +255,7 @@ class CommandRegistry:
             args=args,
             args_text=args_text,
             event=event,
+            registry=self,
             _store=self._store,
         )
         result = command.handler(context)

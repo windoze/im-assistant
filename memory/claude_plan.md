@@ -1,3 +1,25 @@
+## Current invocation plan
+
+I cannot record private chain-of-thought, but this file will track the actionable plan, decisions, and progress for this invocation.
+
+1. Read `TODO.md` and identify the first task whose heading is not prefixed with `[DONE]`.
+2. Check the latest commit message for any unfinished issue directly relevant to that selected task.
+3. Read the selected task details and the relevant project context, source, and tests.
+4. Implement the selected task completely, or add the minimum prerequisite task if a concrete blocker prevents correct execution.
+5. Run required formatting, linting, and tests; fix or explicitly schedule any unscheduled failures before marking the task complete.
+6. Update `TODO.md` by prefixing the completed task heading with `[DONE]` and recording completion details.
+7. Commit all changes for this one task with a descriptive message, then stop.
+
+## Current invocation progress
+
+- Started invocation and refreshed the plan/progress file before code or command execution.
+- Read `TODO.md` and selected the first incomplete task: T33 `[TODO]` 首批指令.
+- Checked latest commit `d3ae190 [T32] Add command registry and authorization`; it does not mention an unfinished issue relevant to T33.
+- Inspected command registry, router, AgentLoop consent/cancel flows, TokenVault, Authorizer, SessionInterrupt, store APIs, and tests. Planned T33 as a built-in command module wired into the existing deterministic slash-command registry.
+- Implemented the T33 built-in command registry (`/help`, `/reset`, `/whoami`, `/connect`, `/disconnect`, `/cancel`), runtime wiring, `/cancel` pending-interaction routing, README documentation, and focused tests. Focused validation passed.
+- Full validation passed after the final routing tweak: `ruff format`, `ruff check`, full `pytest`, and `python -m src.main`.
+- Marked T33 `[DONE]` in `TODO.md` with completion details; no phase-level `PLAN.md` changes were needed.
+
 Execution plan for current invocation:
 1. Confirm the first incomplete TODO task and inspect the latest commit for a directly relevant unfinished issue before broad triage.
 2. For T32, inspect the existing router, session, capability, identity, store, config, and tests needed to add a command registry without disturbing the AI tool registry.

@@ -210,10 +210,11 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
     from src.capabilities import Authorizer, load_capability_registry
     from src.core import (
         AgentLoop,
-        CommandRegistry,
         InteractionCallbackRouter,
         SessionInboxDispatcher,
+        SessionInterruptManager,
         SessionManager,
+        create_builtin_command_registry,
     )
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
@@ -256,6 +257,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
 
             async with DingTalkOutbound(dingtalk_client) as outbound:
                 async with LLMClient(app_config.llm) as llm_client:
+                    interrupt_manager = SessionInterruptManager(store)
                     agent_loop = AgentLoop(
                         store,
                         llm_client,
@@ -275,12 +277,24 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                             },
                         },
                         authorizer=authorizer,
+                        interrupt_manager=interrupt_manager,
                         confirm_card_sender=dingtalk_client,
                         confirm_timeout_seconds=app_config.session.confirm_timeout_sec,
                     )
                     callback_router = InteractionCallbackRouter(agent_loop)
-                    command_registry = CommandRegistry(store)
                     timeout_scheduler = InteractionTimeoutScheduler(agent_loop, outbound)
+                    command_registry = create_builtin_command_registry(
+                        store,
+                        capability_registry_factory=capability_registry_for_session,
+                        channel_enabled_capabilities=(
+                            app_config.capabilities.channel_enabled_capabilities
+                        ),
+                        token_vault=token_vault,
+                        authorizer=authorizer,
+                        interrupt_manager=interrupt_manager,
+                        interaction_canceller=agent_loop,
+                        timeout_scheduler=timeout_scheduler,
+                    )
                     await schedule_persisted_interaction_timeouts(store, timeout_scheduler)
 
                     async def process_event(event: InboundEvent) -> None:
@@ -359,6 +373,16 @@ async def handle_inbound_event(
     if route.kind == "pending_interaction":
         if session is None or agent_loop is None:
             raise ValueError("pending interaction routing requires a Session and agent_loop")
+        cancel_command_text = _cancel_command_text(event)
+        if cancel_command_text is not None and command_handler is not None:
+            await _handle_command_message(
+                event,
+                outbound=outbound,
+                session=session,
+                command_text=cancel_command_text,
+                command_handler=command_handler,
+            )
+            return
         cancellation = await agent_loop.cancel_pending_interaction_for_session(
             session,
             reason="superseded_by_new_message",
@@ -469,6 +493,19 @@ async def _on_inbound_message(
             [{"role": "user", "content": message.text}],
         )
     await outbound.reply(message, reply_text)
+
+
+def _cancel_command_text(event: object) -> str | None:
+    text = getattr(event, "text", None)
+    if not isinstance(text, str):
+        return None
+    stripped = text.lstrip()
+    if stripped == "":
+        return None
+    parts = stripped.split()
+    if len(parts) == 1 and parts[0].lower() == "/cancel":
+        return stripped
+    return None
 
 
 def _reply_target_from_pending(
