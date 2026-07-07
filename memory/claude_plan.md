@@ -2,18 +2,22 @@
 
 I will execute exactly the first incomplete task in `TODO.md`, using `TODO.md` as the authoritative source of ordering and requirements. I will not perform broad issue triage before selecting that task.
 
+Selected task: `T39 [DONE] 【REVIEW】M7 加固 + 全系统终审`.
+
 Step-by-step plan:
-1. Read `TODO.md` to identify the first task whose heading is not prefixed with `[DONE]`.
-2. Inspect the selected task details, its dependencies, and any relevant nearby project plan context.
-3. Check the current repository state so I can avoid overwriting unrelated user changes.
-4. Implement the selected task fully, adding or updating tests and documentation where required by the task.
-5. Run formatting, linting, and relevant tests in the required order, escalating to the full suite when code changes require it.
-6. If an unscheduled failing test or concrete blocker prevents completion, update `TODO.md` with the minimum prerequisite task needed, leave the current task incomplete, commit that bookkeeping, and stop.
-7. If the task is completed, prefix its title in `TODO.md` with `[DONE]`, update its completion record, commit all task-related changes, and stop without starting the next task.
+
+1. Check the current repository state and latest commit for any directly relevant unfinished issue.
+2. Review the M7 hardening surfaces from T35-T38: audit logging, reconnect/idempotency/recovery, high-sensitivity confirm enforcement, metrics, and sandbox status.
+3. Compare the implemented behavior against `docs/architecture.md` where T39 calls for architectural alignment.
+4. Run validation in the required order: `.venv/bin/ruff format .`, `.venv/bin/ruff check .`, then `.venv/bin/pytest -q`.
+5. Fix any concrete in-scope defects or unscheduled test failures found during review/validation.
+6. Update `TODO.md` to mark T39 `[DONE]` and add a completion record with review findings, validation results, and any external end-to-end verification limitations.
+7. Re-run relevant validation after edits, commit all task-related changes with a T39 commit message, and stop.
 
 Progress:
-- Plan initialized before repository inspection.
-- Identified first incomplete TODO task: T38 `[TODO]` optional Tool execution sandbox.
-- Next I will inspect the latest commit, repository status, and capability/tool code to determine whether the project currently exposes arbitrary code/script execution. If no such tool exists, I will complete T38 by documenting that sandboxing is not currently required; otherwise I will implement the required sandbox boundary and tests.
-- Inspection found no arbitrary code/script execution tool; existing capabilities use fixed DingTalk API and LLM summarization handlers.
-- Updated `TODO.md` to mark T38 done with a completion record, and updated `README.md` to document that no sandbox is active because no such tool exists. If a future code/script execution capability is added, sandboxing becomes a prerequisite.
+
+- Identified first incomplete TODO task: T39 `[TODO]` M7 hardening + full-system final review.
+- Latest commit is `[T38] Document sandbox not currently required`; no directly relevant unfinished blocker was mentioned.
+- Review found an in-scope M7 robustness gap: if the process exits after claiming an inbound `msg_id` but before marking it processed or releasing it, the persisted `processing` claim can cause DingTalk retries after restart to be skipped as duplicates. I will add startup recovery for stale `processing` inbound claims and cover it with tests.
+- Implemented stale inbound-claim recovery in `SQLiteStore`, invoked it during Stream startup, documented the behavior in `README.md`, and added store/startup regression tests.
+- Validation passed with `.venv/bin/ruff format .`, `.venv/bin/ruff check .`, and `.venv/bin/pytest -q`. T39 is marked `[DONE]` in `TODO.md` with the review finding, fix, validation, and external-verification limitations recorded.

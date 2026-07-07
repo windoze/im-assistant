@@ -72,6 +72,13 @@ class InboundIdempotencyStore(Protocol):
         """Release a failed inbound message claim."""
 
 
+class InboundClaimRecoveryStore(Protocol):
+    """Store surface used to recover in-flight inbound claims after restart."""
+
+    async def release_processing_inbound_messages(self, *, platform: str | None = None) -> int:
+        """Release stale processing claims for retry."""
+
+
 class AgentRunner(Protocol):
     """Protocol for the persistent multi-turn agent loop."""
 
@@ -264,6 +271,18 @@ async def recover_persisted_session_state(store: SessionRecoveryStore) -> None:
         )
 
 
+async def recover_inbound_message_claims(store: InboundClaimRecoveryStore) -> int:
+    """Release stale in-flight inbound claims so platform retries are not skipped."""
+
+    released = await store.release_processing_inbound_messages(platform=DINGTALK_PLATFORM)
+    if released:
+        logger.warning(
+            "inbound_message_claims_recovered",
+            extra={"platform": DINGTALK_PLATFORM, "released": released},
+        )
+    return released
+
+
 async def main(*, start_stream: bool = False, config: AppConfig | None = None) -> None:
     """Start the assistant runtime."""
 
@@ -296,6 +315,7 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
 
     async with SQLiteStore(app_config.storage.database_path) as store:
         await store.initialize()
+        await recover_inbound_message_claims(store)
         audit_logger = AuditLogger(store)
         session_manager = SessionManager(store, bot_id=app_config.dingtalk.robot_code)
         token_vault = TokenVault.from_config(store, app_config.token_vault)

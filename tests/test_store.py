@@ -291,3 +291,53 @@ async def test_store_lists_active_pending_interactions_by_expiry(tmp_path) -> No
 
     assert active_before_resolution == [earlier, later]
     assert active == [later]
+
+
+@pytest.mark.asyncio
+async def test_store_releases_stale_processing_inbound_claims(tmp_path) -> None:
+    """Startup recovery should drop only in-flight inbound claims so retries can run."""
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        assert await store.try_claim_inbound_message(
+            platform="dingtalk",
+            msg_id="processing-dingtalk",
+            conversation_id="conversation-1",
+        )
+        assert await store.try_claim_inbound_message(
+            platform="dingtalk",
+            msg_id="processed-dingtalk",
+            conversation_id="conversation-1",
+        )
+        await store.mark_inbound_message_processed(
+            platform="dingtalk",
+            msg_id="processed-dingtalk",
+        )
+        assert await store.try_claim_inbound_message(
+            platform="other-platform",
+            msg_id="processing-other",
+            conversation_id="conversation-1",
+        )
+
+        released_dingtalk = await store.release_processing_inbound_messages(platform="dingtalk")
+        released_all = await store.release_processing_inbound_messages()
+
+        processing_dingtalk = await store.get_inbound_message(
+            platform="dingtalk",
+            msg_id="processing-dingtalk",
+        )
+        processed_dingtalk = await store.get_inbound_message(
+            platform="dingtalk",
+            msg_id="processed-dingtalk",
+        )
+        processing_other = await store.get_inbound_message(
+            platform="other-platform",
+            msg_id="processing-other",
+        )
+
+    assert released_dingtalk == 1
+    assert released_all == 1
+    assert processing_dingtalk is None
+    assert processed_dingtalk is not None
+    assert processed_dingtalk.status == "processed"
+    assert processing_other is None

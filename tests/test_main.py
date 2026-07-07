@@ -29,6 +29,7 @@ from src.main import (
     InteractionTimeoutScheduler,
     handle_inbound_event,
     main,
+    recover_inbound_message_claims,
     recover_persisted_session_state,
     schedule_persisted_interaction_timeouts,
 )
@@ -582,6 +583,35 @@ async def test_recover_persisted_session_state_after_restart(tmp_path) -> None:
         "expires_at": "2030-01-01T00:00:00+00:00",
         "payload": {"action": "发送钉钉通知"},
     }
+
+
+@pytest.mark.asyncio
+async def test_recover_inbound_message_claims_releases_stale_processing_claims(
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Startup recovery should let DingTalk retry messages claimed before a crash."""
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        await store.initialize()
+        assert await store.try_claim_inbound_message(
+            platform="dingtalk",
+            msg_id="msg-crashed",
+            conversation_id="conversation-1",
+        )
+
+        with caplog.at_level(logging.WARNING):
+            released = await recover_inbound_message_claims(store)
+        marker = await store.get_inbound_message(platform="dingtalk", msg_id="msg-crashed")
+
+    assert released == 1
+    assert marker is None
+    assert any(
+        record.message == "inbound_message_claims_recovered"
+        and record.platform == "dingtalk"
+        and record.released == 1
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

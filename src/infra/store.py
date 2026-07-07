@@ -601,6 +601,25 @@ class SQLiteStore:
         await db.commit()
         return cursor.rowcount > 0
 
+    async def release_processing_inbound_messages(self, *, platform: str | None = None) -> int:
+        """Release stale in-flight inbound claims after process startup recovery."""
+
+        db = await self._connection()
+        if platform is None:
+            cursor = await db.execute(
+                "DELETE FROM inbound_messages WHERE status = 'processing'",
+            )
+        else:
+            cursor = await db.execute(
+                """
+                DELETE FROM inbound_messages
+                WHERE platform = ? AND status = 'processing'
+                """,
+                (_non_empty_string(platform, "platform"),),
+            )
+        await db.commit()
+        return cursor.rowcount
+
     async def get_inbound_message(
         self,
         *,

@@ -58,9 +58,10 @@ context is cleared when no pending row exists.
 The Stream adapter reconnects after disconnects with exponential backoff until the process is
 cancelled. Each triggered inbound DingTalk `msg_id` is claimed in SQLite before processing and marked
 processed only after the turn succeeds, so duplicate callbacks are skipped while failed attempts can
-be retried. Outbound replies are serialized by a small rate limiter to avoid burst-sending, and
-application-token OpenAPI calls retry once with a freshly fetched token when DingTalk reports the
-cached `access_token` is invalid or expired.
+be retried. On startup, any stale `processing` claims left by a prior process exit are released so
+DingTalk retries are not mistaken for completed duplicates. Outbound replies are serialized by a small
+rate limiter to avoid burst-sending, and application-token OpenAPI calls retry once with a freshly
+fetched token when DingTalk reports the cached `access_token` is invalid or expired.
 
 `src.infra.audit.AuditLogger` writes append-only records to `audit_log` for security-relevant
 decisions: OBO authorization grants/consent/denials, confirm or consent resolutions/cancellations,
