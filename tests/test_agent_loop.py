@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -337,15 +338,20 @@ async def test_agent_loop_suspends_confirm_tool_and_executes_after_approval(tmp_
         messages_after_callback = await store.list_messages(session.session_id)
 
     assert result.status == "awaiting_interaction"
-    assert "发送钉钉通知" in result.reply_text
+    assert "执行高敏感能力：send_notification" in result.reply_text
     assert confirm_sender.calls == [
         {
             "conversation_type": 1,
             "conversation_id": "conversation-1",
             "open_conversation_id": "conversation-1",
             "responder_user_id": "user-1",
-            "action": "发送钉钉通知",
-            "details": {"target": "user:user-1", "content": "请大家 3 点开会"},
+            "action": "执行高敏感能力：send_notification",
+            "details": {
+                "capability": "send_notification",
+                "sensitivity": "high",
+                "session_kind": "dm",
+                "arguments": {"content": "请大家 3 点开会"},
+            },
             "correlation_id": "confirm-1",
             "expires_at": datetime(2026, 1, 1, 12, 1, tzinfo=UTC),
         }
@@ -357,9 +363,16 @@ async def test_agent_loop_suspends_confirm_tool_and_executes_after_approval(tmp_
         "capability": "send_notification",
         "tool_use_id": "toolu-notify",
         "arguments": {"content": "请大家 3 点开会"},
-        "action": "发送钉钉通知",
-        "details": {"target": "user:user-1", "content": "请大家 3 点开会"},
+        "action": "执行高敏感能力：send_notification",
+        "details": {
+            "capability": "send_notification",
+            "sensitivity": "high",
+            "session_kind": "dm",
+            "arguments": {"content": "请大家 3 点开会"},
+        },
         "session_id": session.session_id,
+        "confirm_source": "runtime_sensitivity",
+        "sensitivity": "high",
     }
     assert awaiting_session is not None
     assert awaiting_session.state == "AwaitingInteraction"
@@ -382,6 +395,99 @@ async def test_agent_loop_suspends_confirm_tool_and_executes_after_approval(tmp_
         ("assistant", "awaiting_interaction"),
         ("tool", "confirm_executed"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_runtime_confirms_high_sensitivity_tool_without_handler_confirm(
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """High-sensitivity tools should suspend for confirm even if handlers omit ctx.confirm."""
+
+    side_effects: list[str] = []
+
+    async def dangerous_write(_context: CapabilityExecutionContext, *, content: str) -> str:
+        side_effects.append(content)
+        return f"wrote:{content}"
+
+    registry = CapabilityRegistry(
+        [
+            Capability(
+                name="dangerous_write",
+                origin="system",
+                available_in=["global"],
+                sensitivity="high",
+                handler=dangerous_write,
+                input_schema={
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}},
+                    "required": ["content"],
+                },
+            )
+        ]
+    )
+    llm_client = ToolCallingCompleter(
+        [
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu-danger",
+                    "name": "dangerous_write",
+                    "input": {"content": "sensitive payload"},
+                }
+            ]
+        ]
+    )
+    confirm_sender = FakeConfirmCardSender()
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=registry,
+            confirm_card_sender=confirm_sender,
+            confirm_id_factory=lambda: "confirm-danger",
+        )
+
+        with caplog.at_level(logging.INFO, logger="im_assistant.metrics"):
+            result = await agent_loop.run(session, "run dangerous write")
+            assert side_effects == []
+            pending = await store.get_pending_interaction("confirm-danger")
+            callback_result = await agent_loop.resolve_confirm_callback(
+                "confirm-danger",
+                responder="user-1",
+                approved=True,
+            )
+
+    assert result.status == "awaiting_interaction"
+    assert side_effects == ["sensitive payload"]
+    assert callback_result.tool_result == "wrote:sensitive payload"
+    assert pending is not None
+    assert pending.payload["confirm_source"] == "runtime_sensitivity"
+    assert confirm_sender.calls[0]["action"] == "执行高敏感能力：dangerous_write"
+    assert confirm_sender.calls[0]["details"] == {
+        "capability": "dangerous_write",
+        "sensitivity": "high",
+        "session_kind": "dm",
+        "arguments": {"content": "sensitive payload"},
+    }
+    metric_records = [
+        record
+        for record in caplog.records
+        if record.message == "runtime_metric" and record.metric_name == "tool_calls_total"
+    ]
+    assert any(
+        record.metric_labels["tool"] == "dangerous_write"
+        and record.metric_labels["outcome"] == "awaiting_confirm"
+        for record in metric_records
+    )
+    assert any(
+        record.metric_labels["tool"] == "dangerous_write"
+        and record.metric_labels["outcome"] == "confirmed_completed"
+        for record in metric_records
+    )
 
 
 @pytest.mark.asyncio
@@ -487,7 +593,7 @@ async def test_agent_loop_superseding_message_cancels_pending_confirm_silently(
 
     assert cancellation is not None
     assert cancellation.reason == "superseded_by_new_message"
-    assert cancellation.notice_text == "已取消:未确认，[发送钉钉通知] 未执行。"
+    assert cancellation.notice_text == "已取消:未确认，[执行高敏感能力：send_notification] 未执行。"
     assert cancellation.session.state == "Idle"
     assert dingtalk_client.calls == []
     assert cancelled is not None
@@ -510,23 +616,36 @@ async def test_agent_loop_superseding_message_cancels_pending_confirm_silently(
     ]
     assert [message.content for message in messages[:3]] == [
         "发通知",
-        "请在钉钉确认卡片中确认是否执行：发送钉钉通知",
-        "已取消:未确认，[发送钉钉通知] 未执行。",
+        "请在钉钉确认卡片中确认是否执行：执行高敏感能力：send_notification",
+        "已取消:未确认，[执行高敏感能力：send_notification] 未执行。",
     ]
     assert json.loads(messages[3].content) == {
         "status": "Cancelled",
         "kind": "confirm",
         "reason": "superseded_by_new_message",
         "correlation_id": "confirm-superseded",
-        "action": "发送钉钉通知",
-        "details": {"target": "user:user-1", "content": "请大家 3 点开会"},
+        "action": "执行高敏感能力：send_notification",
+        "details": {
+            "capability": "send_notification",
+            "sensitivity": "high",
+            "session_kind": "dm",
+            "arguments": {"content": "请大家 3 点开会"},
+        },
     }
     assert [
         (message.role, message.metadata.get("status"), message.content) for message in messages[:3]
     ] == [
         ("user", None, "发通知"),
-        ("assistant", "awaiting_interaction", "请在钉钉确认卡片中确认是否执行：发送钉钉通知"),
-        ("system", "interaction_cancelled", "已取消:未确认，[发送钉钉通知] 未执行。"),
+        (
+            "assistant",
+            "awaiting_interaction",
+            "请在钉钉确认卡片中确认是否执行：执行高敏感能力：send_notification",
+        ),
+        (
+            "system",
+            "interaction_cancelled",
+            "已取消:未确认，[执行高敏感能力：send_notification] 未执行。",
+        ),
     ]
     assert len(llm_client.calls) == 1
 
@@ -577,7 +696,9 @@ async def test_agent_loop_timeout_cancels_pending_confirm_with_system_notice(
 
     assert cancellation is not None
     assert cancellation.reason == "timeout"
-    assert cancellation.notice_text == "已取消:确认超时，[发送钉钉通知] 未执行。"
+    assert (
+        cancellation.notice_text == "已取消:确认超时，[执行高敏感能力：send_notification] 未执行。"
+    )
     assert dingtalk_client.calls == []
     assert cancelled is not None
     assert cancelled.status == "cancelled"
@@ -817,7 +938,10 @@ async def test_agent_loop_exposes_schedule_summary_in_dm_and_suspends_for_calend
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_returns_tool_execution_errors_to_claude(tmp_path) -> None:
+async def test_agent_loop_returns_tool_execution_errors_to_claude(
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Handler failures should become tool_result errors rather than crashing the turn."""
 
     async def explode(_context: CapabilityExecutionContext) -> str:
@@ -849,7 +973,8 @@ async def test_agent_loop_returns_tool_execution_errors_to_claude(tmp_path) -> N
             capability_registry=registry,
         )
 
-        result = await agent_loop.run(session, "please fail")
+        with caplog.at_level(logging.INFO, logger="im_assistant.metrics"):
+            result = await agent_loop.run(session, "please fail")
 
     tool_result = llm_client.calls[1]["messages"][-1]["content"][0]
     assert result.reply_text == "handled failure"
@@ -857,6 +982,13 @@ async def test_agent_loop_returns_tool_execution_errors_to_claude(tmp_path) -> N
     assert tool_result["tool_use_id"] == "toolu-err"
     assert tool_result["is_error"] is True
     assert "Tool explode failed: boom" in tool_result["content"]
+    assert any(
+        record.message == "runtime_metric"
+        and record.metric_name == "errors_total"
+        and record.metric_labels["component"] == "agent_loop_tool"
+        and record.metric_labels["error_type"] == "RuntimeError"
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

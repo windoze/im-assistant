@@ -66,7 +66,10 @@ cached `access_token` is invalid or expired.
 decisions: OBO authorization grants/consent/denials, confirm or consent resolutions/cancellations,
 and deterministic slash-command dispatch. Each record includes the DingTalk actor, represented
 principal, Session, scope or service, action, timestamp, and JSON metadata without storing token
-material.
+material. Runtime counters are also emitted as structured `runtime_metric` JSON logs, including
+`messages_total`, `tool_calls_total`, `obo_authorizations_total`, and `errors_total`, so message
+volume, tool usage, authorization success/consent/denial rates, and error rates can be observed from
+logs without querying SQLite.
 
 `src.infra.token_vault.TokenVault` stores DingTalk user-level OBO access and refresh tokens in the
 `token_vault` table encrypted with the `.env` Fernet key, and marks grants that are expired or within
@@ -101,11 +104,13 @@ exposes this through `resume_interaction(...)` for OAuth/callback routing.
 
 Capability handlers can call `await context.confirm(action, details)` before sensitive side effects.
 The agent loop stores a `confirm` interrupt, sends a DingTalk interactive card with confirm/cancel
-buttons, and returns without running the tool. DingTalk card callbacks are registered on the Stream
-card callback topic, normalized by `normalize_card_callback(...)`, and routed by
-`InteractionCallbackRouter` using the callback `correlation_id` plus responder. Confirm executes the
-deferred tool directly without another LLM roundtrip; cancel resolves the pending interaction without
-running the tool.
+buttons, and returns without running the tool. Any capability declared with `sensitivity="high"` is
+also guarded by the runtime before the handler or tool executor runs; the card content is rendered
+deterministically from the tool name, sensitivity, Session kind, and tool arguments rather than from
+LLM prose. DingTalk card callbacks are registered on the Stream card callback topic, normalized by
+`normalize_card_callback(...)`, and routed by `InteractionCallbackRouter` using the callback
+`correlation_id` plus responder. Confirm executes the deferred tool directly without another LLM
+roundtrip; cancel resolves the pending interaction without running the tool.
 
 If a Session is still `AwaitingInteraction`, a later inbound message cancels the pending interaction as
 `superseded_by_new_message`, sends a runtime system notice such as `已取消:未确认，[发送钉钉通知] 未执行。`,
@@ -151,8 +156,8 @@ one DM-only calendar tool that uses OBO authorization:
 | `contact_lookup` | Look up DingTalk contacts by userId or display name. | Uses the contact APIs from the OpenAPI client. |
 | `create_doc` | Create a DingTalk document and append text content. | For group use, add `create_doc` to `capabilities.channel_enabled.<openConversationId>`. Configure `dingtalk.document.parent_object_type` and `dingtalk.document.parent_object_id`, or provide those fields as tool input. |
 | `create_todo` | Create a DingTalk todo task for the current actor or a specified assignee. | Resolves userId to unionId through the contact API, then calls the todo API with the app token. |
-| `send_notification` | Send a DingTalk notification after an explicit confirm-card approval. | Calls `context.confirm("发送钉钉通知", details)` before sending; cancel callbacks do not send. For group use, add `send_notification` to `capabilities.channel_enabled.<openConversationId>`. |
-| `schedule_summary` | Summarize the current DM actor's DingTalk calendar for today. | Requires `calendar:read` OBO consent, reads `/v1.0/calendar/primary` and `/v1.0/calendar/users/me/calendars/<calendarId>/events` with the user token, then asks Claude to summarize the events. |
+| `send_notification` | Send a DingTalk notification after an explicit confirm-card approval. | Marked `sensitivity="high"`, so runtime confirmation is mandatory before sending. For group use, add `send_notification` to `capabilities.channel_enabled.<openConversationId>`. |
+| `schedule_summary` | Summarize the current DM actor's DingTalk calendar for today. | Marked `sensitivity="high"` and requires `calendar:read` OBO consent; after authorization and confirmation it reads `/v1.0/calendar/primary` and `/v1.0/calendar/users/me/calendars/<calendarId>/events` with the user token, then asks Claude to summarize the events. |
 
 Run tests:
 

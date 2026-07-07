@@ -43,12 +43,15 @@ def test_main_logs_startup(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_inbound_event_replies_to_triggered_text_message() -> None:
+async def test_handle_inbound_event_replies_to_triggered_text_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     outbound = FakeOutbound()
     llm_client = FakeLLMClient("LLM reply")
     event = _text_event()
 
-    await handle_inbound_event(event, outbound=outbound, llm_client=llm_client)
+    with caplog.at_level(logging.INFO, logger="im_assistant.metrics"):
+        await handle_inbound_event(event, outbound=outbound, llm_client=llm_client)
 
     assert llm_client.calls == [
         (
@@ -57,6 +60,13 @@ async def test_handle_inbound_event_replies_to_triggered_text_message() -> None:
         )
     ]
     assert outbound.replies == [(event, "LLM reply")]
+    message_metrics = [
+        record
+        for record in caplog.records
+        if record.message == "runtime_metric" and record.metric_name == "messages_total"
+    ]
+    assert any(record.metric_labels["outcome"] == "received" for record in message_metrics)
+    assert any(record.metric_labels["outcome"] == "agent_loop" for record in message_metrics)
 
 
 @pytest.mark.asyncio

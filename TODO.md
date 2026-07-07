@@ -466,10 +466,17 @@
   - 已补充测试覆盖 store CRUD、OAuth pending state 重启、重复 `msg_id` 跳过、会话状态恢复、Stream 重连退避、access_token 重取重试和出站限流。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_store.py tests/test_oauth.py tests/test_main.py tests/test_dingtalk_stream.py tests/test_dingtalk_client.py tests/test_dingtalk_outbound.py -q`、`.venv/bin/pytest -q`、`python -m src.main`。
 
-## T37 `[TODO]` 不可信输入边界与可观测
+## [DONE] T37 不可信输入边界与可观测
 - 高敏感工具强制走 confirm/白名单(架构 §9),不依赖 LLM 自觉;在 Capability 上用 `sensitivity` 标记并由运行时强制。
 - 关键指标:消息量、工具调用数、授权成功率、错误率(结构化日志或简单计数)。
 - **验收**:标记为高敏感的工具必定触发 confirm;指标可从日志观察。
+- **完成记录(2026-07-07)**:
+  - 已新增 `src/infra/metrics.py` 结构化计数器,通过 `runtime_metric` JSON 日志输出 `messages_total`、`tool_calls_total`、`obo_authorizations_total` 和 `errors_total`,可从日志观察消息量、工具调用、OBO 授权成功/需授权/拒绝分布和错误率。
+  - 已在入站路由记录消息 received/ignored/duplicate/unsupported/command/agent_loop 指标,在 Authorizer 记录 OBO 授权决策指标,在 AgentLoop 记录工具 completed/awaiting_confirm/awaiting_consent/failed/confirmed_completed 指标和错误指标。
+  - 已将 `Capability.sensitivity` 归一化为小写,并在 AgentLoop 中强制所有 `sensitivity="high"` 能力先创建 confirm interrupt、发送确认卡片并挂起;确认卡片内容由运行时从工具名、敏感级别、Session 类型和工具入参渲染,不依赖 LLM 或 handler 自觉调用 `ctx.confirm`。
+  - 已保持高敏工具确认后的回调执行路径不再二次弹卡,但 handler 内原有 `ctx.confirm(...)` 仍可作为代码级声明并在运行时确认后通过。
+  - 已补充回归测试覆盖未调用 `ctx.confirm` 的高敏 handler 仍不会在确认前执行、工具/授权/消息/错误指标会进入结构化日志、既有 confirm 取消/超时路径仍不执行副作用。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`python -m src.main`。
 
 ## T38 `[TODO]` (可选)Tool 执行沙箱
 - 若已引入执行任意代码/脚本的工具:子进程/容器 + 受限 FS;Session 逻辑隔离(独立 workdir/上下文/凭证视图,架构 §9)。无此类工具则记录"暂不需要"并跳过。

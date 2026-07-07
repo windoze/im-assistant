@@ -1,52 +1,36 @@
 # Execution Plan
 
-I will follow `TODO.md` as the authoritative source of work and complete exactly the first task whose heading is not prefixed with `[DONE]`. I will not perform broad unrelated triage before selecting that task.
+I will use `TODO.md` as the authoritative task list and complete exactly the first task whose heading is not prefixed with `[DONE]`. I will not include private chain-of-thought here, but this file will track the concrete plan, decisions, and progress.
 
 ## Steps
 
-1. Read `TODO.md` to identify the first incomplete task and its stated validation requirements.
-2. Check the latest commit message only for unfinished work that is directly relevant to that selected task.
-3. Inspect the task-specific implementation area and existing tests.
-4. Implement the selected task completely, without narrowing the specification or relying on workarounds.
-5. Run formatting, linting, and relevant tests in the required order, escalating to the full suite when code changes require it.
-6. If a concrete blocker or unscheduled failing test prevents completion, update `TODO.md` with the minimum prerequisite task and stop after committing that bookkeeping.
-7. If the task is completed, mark its title `[DONE]`, update its completion record, and commit all resulting changes with a descriptive message.
+1. Read `TODO.md` to identify the first incomplete task and its validation requirements.
+2. Check the latest commit message for directly relevant unfinished work.
+3. Inspect the code and tests needed for that task only.
+4. Implement the task completely, avoiding workarounds or scope narrowing.
+5. Run formatting, linting, and relevant/full tests as required by the task and repository.
+6. Update `TODO.md` by prefixing the completed task title with `[DONE]` and filling its completion record.
+7. Update this file with key progress.
+8. Commit all changes for this task with a descriptive message and the required co-author trailer.
+9. Stop without starting the next task.
 
-## Current Status
+## Progress
 
-Selected first incomplete task: `T36 错误恢复与鲁棒性`.
-
-## T36 Scope
-
-1. Inspect current Stream, outbound messaging, access-token, session, store, and interrupt persistence code.
-2. Implement Stream reconnect with exponential backoff.
-3. Implement inbound message idempotency by `msg_id`.
-4. Ensure access-token invalidation triggers a fresh token and retry for outbound/API calls that fail due to token expiry.
-5. Add outbound message rate limiting to prevent rapid repeated sends.
-6. Restore session state and pending interactions from SQLite during process startup.
-7. Add or update tests for reconnect, deduplication, token refresh retry, rate limiting, and restart recovery.
-8. Run formatting, linting, and relevant/full tests as required.
-9. Mark T36 `[DONE]` with a completion record and commit all task changes.
-
-## Current Progress
-
-Implemented the T36 robustness layer:
-
-1. Added SQLite persistence for inbound message idempotency and pending OAuth authorization state.
-2. Added restart recovery for persisted Session state and pending interaction context.
-3. Wired runtime startup to use persistent OAuth pending state, recover sessions, restore pending timeouts, and skip duplicate inbound `msg_id`s.
-4. Added Stream reconnect with exponential backoff.
-5. Added app access-token invalidation retry for DingTalk OpenAPI calls.
-6. Added outbound reply rate limiting.
-7. Added focused tests for persistence, OAuth restart, inbound deduplication, session recovery, Stream reconnect, token retry, and outbound rate limiting.
-8. Updated README with the new recovery/idempotency/retry guarantees.
-
-Validation so far:
-
-1. `.venv/bin/ruff format .`
-2. `.venv/bin/ruff check .`
-3. `.venv/bin/pytest tests/test_store.py tests/test_oauth.py tests/test_main.py tests/test_dingtalk_stream.py tests/test_dingtalk_client.py tests/test_dingtalk_outbound.py -q`
-4. `.venv/bin/pytest -q`
-5. `python -m src.main`
-
-`TODO.md` has been updated to mark T36 `[DONE]` with its completion record. Next step: commit T36.
+- Identified first incomplete task: `T37 [TODO] 不可信输入边界与可观测`.
+- Current task requirements:
+  - Enforce high-sensitivity capabilities through runtime guardrails, using `Capability.sensitivity`, without relying on LLM behavior.
+  - Add confirm/allowlist protection for high-sensitivity tools.
+  - Add observable metrics for message volume, tool calls, authorization success rate, and error rate through structured logs or counters.
+  - Validate that high-sensitivity tools always trigger confirm and metrics are visible from logs.
+- Baseline validation before code changes passed: `ruff format --check`, `ruff check`, and `pytest -q`.
+- Implementation direction:
+  - Add a small structured metric counter helper under `src/infra`.
+  - Make `AgentLoop` force a confirm interrupt before executing any `sensitivity="high"` capability, even if the handler forgets to call `ctx.confirm`.
+  - Preserve existing handler-level confirm behavior after runtime approval without requiring a second card.
+  - Emit metrics for inbound messages/errors, capability tool outcomes, and OBO authorization decisions.
+- Implemented:
+  - Added structured runtime counters emitted as JSON logs.
+  - Enforced runtime confirm for every high-sensitivity capability before handler/tool-executor execution.
+  - Added metrics for inbound messages, tool outcomes, OBO authorization decisions, and errors.
+  - Updated README and marked T37 `[DONE]` in `TODO.md`.
+- Final validation passed: `.venv/bin/ruff format .`, `.venv/bin/ruff check .`, `.venv/bin/pytest -q`, and `python -m src.main`.

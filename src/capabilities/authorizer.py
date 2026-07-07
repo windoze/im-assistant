@@ -15,6 +15,7 @@ from src.capabilities.registry import CapabilityMode
 from src.infra.audit import AuditLogger, OBOAuditDecision
 from src.infra.config import OAuthConfig
 from src.infra.dingtalk_client import DingTalkUserTokenRefreshRejected
+from src.infra.metrics import increment_counter
 from src.infra.oauth import PendingAuth, PendingAuthStore
 from src.infra.token_vault import TokenVaultResolution, UserToken
 
@@ -236,6 +237,16 @@ class Authorizer:
         pending_nonce: str | None = None,
         actor_identity: str | None = None,
     ) -> None:
+        increment_counter(
+            "obo_authorizations_total",
+            labels={
+                "decision": decision,
+                "service": requirement.service,
+                "mode": mode,
+                "refreshed": refreshed,
+                "reason": reason,
+            },
+        )
         if self._audit_logger is None:
             return
         await self._audit_logger.record_obo_authorization(

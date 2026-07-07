@@ -26,6 +26,7 @@ from src.capabilities import (
 from src.core.interrupt import InterruptResolution, SessionInterrupt, SessionInterruptManager
 from src.core.session import Actor, BotIdentity, Principal, Session, SessionState
 from src.infra.log import get_logger
+from src.infra.metrics import increment_counter
 from src.infra.store import (
     MessageRecord,
     MessageRole,
@@ -81,12 +82,14 @@ class AgentLoopConfirmRequired(RuntimeError):
         details: Mapping[str, Any],
         capability: Capability,
         tool_use: ToolUseRequest,
+        source: Literal["handler", "runtime_sensitivity"] = "handler",
     ) -> None:
         self.correlation_id = correlation_id
         self.action = action
         self.details = _plain_json_object(details, "confirm.details")
         self.capability = capability
         self.tool_use = tool_use
+        self.source = source
         super().__init__(f"Confirmation required for capability: {capability.name}")
 
 
@@ -869,16 +872,21 @@ class AgentLoop:
     ) -> dict[str, Any]:
         try:
             result = await self._execute_tool_call(session, tool_use, capabilities)
+            _record_tool_metric(session, tool_use.name, "completed")
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_use.id,
                 "content": result,
             }
         except AgentLoopConsentRequired:
+            _record_tool_metric(session, tool_use.name, "awaiting_consent")
             raise
         except AgentLoopConfirmRequired:
+            _record_tool_metric(session, tool_use.name, "awaiting_confirm")
             raise
         except Exception as exc:
+            _record_tool_metric(session, tool_use.name, "failed", error_type=type(exc).__name__)
+            _record_error_metric("agent_loop_tool", exc)
             logger.exception(
                 "agent_loop_tool_execution_failed",
                 extra={
@@ -904,6 +912,15 @@ class AgentLoop:
         if capability is None:
             raise AgentLoopToolError(f"Tool is not available in this Session: {tool_use.name}")
         credentials = await self._credential_context_for_capability(session, capability, tool_use)
+        if _requires_runtime_confirm(capability):
+            raise AgentLoopConfirmRequired(
+                correlation_id=self._confirm_id_factory(),
+                action=_runtime_confirm_action(capability),
+                details=_runtime_confirm_details(session, capability, tool_use),
+                capability=capability,
+                tool_use=tool_use,
+                source="runtime_sensitivity",
+            )
         if self._tool_executor is not None:
             return _tool_result_text(
                 await self._tool_executor.execute(
@@ -983,17 +1000,34 @@ class AgentLoop:
         if capability is None:
             raise AgentLoopToolError(f"Confirmed tool is no longer available: {capability_name}")
         credentials = await self._credential_context_for_capability(session, capability, tool_use)
-        result = await _execute_capability_handler(
-            session,
-            capability,
-            tool_use.arguments,
-            services=self._capability_services,
-            credentials=credentials,
-            confirmation=_ApprovedCapabilityConfirmation(
-                action=_non_empty_string(payload.get("action"), "confirm.action"),
-                details=_plain_json_object(_mapping_value(payload, "details"), "confirm.details"),
-            ),
-        )
+        try:
+            if self._tool_executor is not None:
+                result = _tool_result_text(
+                    await self._tool_executor.execute(
+                        session=session,
+                        name=tool_use.name,
+                        arguments=tool_use.arguments,
+                    )
+                )
+            else:
+                result = await _execute_capability_handler(
+                    session,
+                    capability,
+                    tool_use.arguments,
+                    services=self._capability_services,
+                    credentials=credentials,
+                    confirmation=_confirmation_for_confirmed_tool(payload),
+                )
+        except Exception as exc:
+            _record_tool_metric(
+                session,
+                tool_use.name,
+                "confirmed_failed",
+                error_type=type(exc).__name__,
+            )
+            _record_error_metric("agent_loop_confirmed_tool", exc)
+            raise
+        _record_tool_metric(session, tool_use.name, "confirmed_completed")
         return result if result.strip() else "confirmed tool completed"
 
     async def _session_from_confirm_payload(self, payload: Mapping[str, Any]) -> Session:
@@ -1163,6 +1197,7 @@ class _RequestingCapabilityConfirmation:
             details=_plain_json_object(details, "confirm.details"),
             capability=self.capability,
             tool_use=self.tool_use,
+            source="handler",
         )
 
 
@@ -1185,6 +1220,72 @@ class _ApprovedCapabilityConfirmation:
         if normalized_action != self.action or normalized_details != self.details:
             raise AgentLoopToolError("Confirmed tool changed its requested action details")
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class _PreApprovedCapabilityConfirmation:
+    async def confirm(self, action: str, details: Mapping[str, Any]) -> bool:
+        _non_empty_string(action, "confirm.action")
+        _plain_json_object(details, "confirm.details")
+        return True
+
+
+def _confirmation_for_confirmed_tool(payload: Mapping[str, Any]) -> CapabilityConfirmation:
+    if payload.get("confirm_source") == "runtime_sensitivity":
+        return _PreApprovedCapabilityConfirmation()
+    return _ApprovedCapabilityConfirmation(
+        action=_non_empty_string(payload.get("action"), "confirm.action"),
+        details=_plain_json_object(_mapping_value(payload, "details"), "confirm.details"),
+    )
+
+
+def _requires_runtime_confirm(capability: Capability) -> bool:
+    return capability.sensitivity.lower() == "high"
+
+
+def _runtime_confirm_action(capability: Capability) -> str:
+    return f"执行高敏感能力：{capability.name}"
+
+
+def _runtime_confirm_details(
+    session: Session,
+    capability: Capability,
+    tool_use: ToolUseRequest,
+) -> dict[str, Any]:
+    return {
+        "capability": capability.name,
+        "sensitivity": capability.sensitivity,
+        "session_kind": session.kind,
+        "arguments": _plain_json_object(tool_use.arguments, "tool_use.arguments"),
+    }
+
+
+def _record_tool_metric(
+    session: Session,
+    tool_name: str,
+    outcome: str,
+    *,
+    error_type: str | None = None,
+) -> None:
+    increment_counter(
+        "tool_calls_total",
+        labels={
+            "tool": tool_name,
+            "session_kind": session.kind,
+            "outcome": outcome,
+            "error_type": error_type,
+        },
+    )
+
+
+def _record_error_metric(component: str, exc: Exception) -> None:
+    increment_counter(
+        "errors_total",
+        labels={
+            "component": component,
+            "error_type": type(exc).__name__,
+        },
+    )
 
 
 def _tool_result_text(value: Any) -> str:
@@ -1340,7 +1441,7 @@ def _confirm_reply_text(confirm: AgentLoopConfirmRequired) -> str:
 
 
 def _confirm_interrupt_payload(session: Session, exc: AgentLoopConfirmRequired) -> dict[str, Any]:
-    return {
+    payload = {
         "capability": exc.capability.name,
         "tool_use_id": exc.tool_use.id,
         "arguments": _plain_json_object(exc.tool_use.arguments, "tool_use.arguments"),
@@ -1348,6 +1449,10 @@ def _confirm_interrupt_payload(session: Session, exc: AgentLoopConfirmRequired) 
         "details": dict(exc.details),
         "session_id": session.session_id,
     }
+    if exc.source == "runtime_sensitivity":
+        payload["confirm_source"] = exc.source
+        payload["sensitivity"] = exc.capability.sensitivity
+    return payload
 
 
 def _mapping_value(values: Mapping[str, Any], key: str) -> Mapping[str, Any]:

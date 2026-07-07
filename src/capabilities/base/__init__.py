@@ -61,7 +61,11 @@ class Capability:
             _literal_tuple(self.available_in, VALID_AVAILABILITY, "available_in"),
         )
         object.__setattr__(self, "requires", _requirement_tuple(self.requires))
-        object.__setattr__(self, "sensitivity", _non_empty_string(self.sensitivity, "sensitivity"))
+        object.__setattr__(
+            self,
+            "sensitivity",
+            _non_empty_string(self.sensitivity, "sensitivity").lower(),
+        )
         if self.handler is not None and not callable(self.handler):
             raise ValueError("handler must be callable when provided")
         if self.owner_id is not None:

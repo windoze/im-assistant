@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from src.infra.log import configure_logging, get_logger
+from src.infra.metrics import increment_counter
 
 if TYPE_CHECKING:
     from src.adapters.dingtalk import InboundEvent, InboundMessage
@@ -408,16 +409,21 @@ async def handle_inbound_event(
 ) -> None:
     """Apply trigger rules and route a normalized DingTalk inbound event."""
 
+    _record_message_metric(event, "received")
     if idempotency_store is None:
-        await _handle_inbound_event_once(
-            event,
-            outbound=outbound,
-            llm_client=llm_client,
-            session_manager=session_manager,
-            agent_loop=agent_loop,
-            command_handler=command_handler,
-            interaction_timeout_scheduler=interaction_timeout_scheduler,
-        )
+        try:
+            await _handle_inbound_event_once(
+                event,
+                outbound=outbound,
+                llm_client=llm_client,
+                session_manager=session_manager,
+                agent_loop=agent_loop,
+                command_handler=command_handler,
+                interaction_timeout_scheduler=interaction_timeout_scheduler,
+            )
+        except Exception as exc:
+            _record_inbound_error_metric(event, exc)
+            raise
         return
 
     claimed = await idempotency_store.try_claim_inbound_message(
@@ -430,6 +436,7 @@ async def handle_inbound_event(
         },
     )
     if not claimed:
+        _record_message_metric(event, "duplicate")
         logger.info(
             "dingtalk_inbound_message_duplicate",
             extra={"msg_id": event.msg_id, "conversation_id": event.conversation_id},
@@ -446,11 +453,12 @@ async def handle_inbound_event(
             command_handler=command_handler,
             interaction_timeout_scheduler=interaction_timeout_scheduler,
         )
-    except Exception:
+    except Exception as exc:
         await idempotency_store.release_inbound_message_claim(
             platform=DINGTALK_PLATFORM,
             msg_id=event.msg_id,
         )
+        _record_inbound_error_metric(event, exc)
         raise
     await idempotency_store.mark_inbound_message_processed(
         platform=DINGTALK_PLATFORM,
@@ -477,6 +485,7 @@ async def _handle_inbound_event_once(
     )
 
     if not is_triggered(event):
+        _record_message_metric(event, "ignored")
         logger.debug(
             "dingtalk_inbound_message_ignored",
             extra={"msg_id": event.msg_id, "conversation_type": event.conversation_type},
@@ -533,6 +542,7 @@ async def _handle_inbound_event_once(
         route = classify_inbound_message(event, session=session)
 
     if isinstance(event, UnsupportedInboundMessage):
+        _record_message_metric(event, "unsupported", session=session)
         logger.info(
             "dingtalk_unsupported_message_type",
             extra={"msg_id": event.msg_id, "message_type": event.message_type},
@@ -541,6 +551,7 @@ async def _handle_inbound_event_once(
         return
 
     if route.kind == "command":
+        _record_message_metric(event, "command", session=session)
         await _handle_command_message(
             event,
             outbound=outbound,
@@ -608,6 +619,7 @@ async def _on_inbound_message(
             "session_id": None if session is None else session.session_id,
         },
     )
+    _record_message_metric(message, "agent_loop", session=session)
     if agent_loop is not None:
         if session is None:
             raise ValueError("agent_loop requires a routed Session")
@@ -640,6 +652,35 @@ def _cancel_command_text(event: object, *, session: Session | None = None) -> st
     if len(parts) == 1 and parts[0].lower() == "/cancel":
         return command_text
     return None
+
+
+def _record_message_metric(
+    event: object,
+    outcome: str,
+    *,
+    session: Session | None = None,
+) -> None:
+    increment_counter(
+        "messages_total",
+        labels={
+            "platform": DINGTALK_PLATFORM,
+            "outcome": outcome,
+            "conversation_type": getattr(event, "conversation_type", "unknown"),
+            "session_kind": None if session is None else session.kind,
+        },
+    )
+
+
+def _record_inbound_error_metric(event: object, exc: Exception) -> None:
+    increment_counter(
+        "errors_total",
+        labels={
+            "component": "inbound",
+            "platform": DINGTALK_PLATFORM,
+            "conversation_type": getattr(event, "conversation_type", "unknown"),
+            "error_type": type(exc).__name__,
+        },
+    )
 
 
 def _reply_target_from_pending(

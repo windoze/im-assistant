@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -25,7 +26,7 @@ from src.infra.token_vault import TokenVaultResolution, UserToken
 
 
 @pytest.mark.asyncio
-async def test_authorizer_grants_valid_obo_token() -> None:
+async def test_authorizer_grants_valid_obo_token(caplog: pytest.LogCaptureFixture) -> None:
     """A valid TokenVault grant should become a user credential handle."""
 
     token = UserToken(
@@ -44,13 +45,14 @@ async def test_authorizer_grants_valid_obo_token() -> None:
         oauth_config=_oauth_config(),
     )
 
-    result = await authorizer.resolve(
-        Requirement(service="calendar", scopes=("calendar:read",), on_behalf_of="actor"),
-        SimpleActor(id="user-1"),
-        "dm",
-        principal_id="user:user-1",
-        session_id="session-1",
-    )
+    with caplog.at_level(logging.INFO, logger="im_assistant.metrics"):
+        result = await authorizer.resolve(
+            Requirement(service="calendar", scopes=("calendar:read",), on_behalf_of="actor"),
+            SimpleActor(id="user-1"),
+            "dm",
+            principal_id="user:user-1",
+            session_id="session-1",
+        )
 
     assert isinstance(result, Granted)
     assert result.handle.kind == "user"
@@ -58,6 +60,13 @@ async def test_authorizer_grants_valid_obo_token() -> None:
     assert result.handle.user_access_token == "user-access-token"
     assert result.handle.scopes == ("calendar:read",)
     assert vault.calls == [("user:user-1", "calendar")]
+    assert any(
+        record.message == "runtime_metric"
+        and record.metric_name == "obo_authorizations_total"
+        and record.metric_labels["decision"] == "granted"
+        and record.metric_labels["service"] == "calendar"
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
