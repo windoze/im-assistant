@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import secrets
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
@@ -23,7 +24,7 @@ from src.capabilities import (
     can_use,
 )
 from src.core.interrupt import InterruptResolution, SessionInterruptManager
-from src.core.session import Session, SessionState
+from src.core.session import Actor, BotIdentity, Principal, Session, SessionState
 from src.infra.log import get_logger
 from src.infra.store import (
     MessageRecord,
@@ -64,6 +65,26 @@ class AgentLoopConsentRequired(RuntimeError):
         super().__init__(f"Consent required for capability: {capability.name}")
 
 
+class AgentLoopConfirmRequired(RuntimeError):
+    """Raised internally when a capability must suspend for a human confirmation."""
+
+    def __init__(
+        self,
+        *,
+        correlation_id: str,
+        action: str,
+        details: Mapping[str, Any],
+        capability: Capability,
+        tool_use: ToolUseRequest,
+    ) -> None:
+        self.correlation_id = correlation_id
+        self.action = action
+        self.details = _plain_json_object(details, "confirm.details")
+        self.capability = capability
+        self.tool_use = tool_use
+        super().__init__(f"Confirmation required for capability: {capability.name}")
+
+
 class CapabilityServiceError(RuntimeError):
     """Raised when a capability requires a runtime service that was not provided."""
 
@@ -77,6 +98,15 @@ class AgentRunResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmCallbackResult:
+    """Result of resolving a confirm-card callback without invoking the LLM."""
+
+    correlation_id: str
+    status: Literal["confirmed", "cancelled"]
+    tool_result: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CapabilityExecutionContext:
     """Runtime context injected into capability handlers."""
 
@@ -84,6 +114,7 @@ class CapabilityExecutionContext:
     capability: Capability
     services: Mapping[str, object] = field(default_factory=dict)
     credentials: CredentialContext | None = None
+    confirmation: CapabilityConfirmation | None = None
 
     def __post_init__(self) -> None:
         """Freeze service mappings so handlers cannot mutate runtime wiring."""
@@ -123,6 +154,13 @@ class CapabilityExecutionContext:
             raise CapabilityServiceError("Credential context is not configured")
         return self.credentials.require_user_token(service)
 
+    async def confirm(self, action: str, details: Mapping[str, Any]) -> bool:
+        """Ask the expected DingTalk responder to approve a tool action before it runs."""
+
+        if self.confirmation is None:
+            raise CapabilityServiceError("Confirmation is not configured for this capability")
+        return await self.confirmation.confirm(action, details)
+
 
 @dataclass(frozen=True, slots=True)
 class ToolUseRequest:
@@ -131,6 +169,31 @@ class ToolUseRequest:
     id: str
     name: str
     arguments: Mapping[str, Any]
+
+
+class CapabilityConfirmation(Protocol):
+    """Confirmation hook exposed as `ctx.confirm(...)` to capability handlers."""
+
+    async def confirm(self, action: str, details: Mapping[str, Any]) -> bool:
+        """Return True once the requested operation has been approved."""
+
+
+class ConfirmCardSender(Protocol):
+    """DingTalk card sender consumed by the agent loop confirm primitive."""
+
+    async def send_confirm_card(
+        self,
+        *,
+        conversation_type: int,
+        conversation_id: str,
+        responder_user_id: str,
+        action: str,
+        details: Mapping[str, Any],
+        correlation_id: str,
+        open_conversation_id: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> object:
+        """Create and deliver a confirm/cancel card."""
 
 
 class TextCompleter(Protocol):
@@ -245,6 +308,10 @@ class AgentLoop:
         capability_services: Mapping[str, object] | None = None,
         authorizer: CapabilityAuthorizer | None = None,
         interrupt_manager: SessionInterruptManager | None = None,
+        confirm_card_sender: ConfirmCardSender | None = None,
+        confirm_timeout_seconds: int = 1800,
+        confirm_id_factory: Callable[[], str] | None = None,
+        now_factory: Callable[[], datetime] = lambda: datetime.now(UTC),
         max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
     ) -> None:
         if capability_registry is not None and capability_registry_factory is not None:
@@ -263,7 +330,17 @@ class AgentLoop:
         )
         self._capability_services = MappingProxyType(dict(capability_services or {}))
         self._authorizer = authorizer
-        self._interrupt_manager = interrupt_manager or SessionInterruptManager(store)
+        self._interrupt_manager = interrupt_manager or SessionInterruptManager(
+            store,
+            now_factory=now_factory,
+        )
+        self._confirm_card_sender = confirm_card_sender
+        self._confirm_timeout_seconds = _positive_int(
+            confirm_timeout_seconds,
+            "confirm_timeout_seconds",
+        )
+        self._confirm_id_factory = confirm_id_factory or _default_confirm_id
+        self._now_factory = now_factory
         self._max_tool_iterations = _positive_int(max_tool_iterations, "max_tool_iterations")
 
     async def run(
@@ -339,6 +416,45 @@ class AgentLoop:
                     },
                 )
                 return AgentRunResult(reply_text=reply_text, status="awaiting_interaction")
+            except AgentLoopConfirmRequired as exc:
+                interrupt = await self._interrupt_manager.create(
+                    session,
+                    kind="confirm",
+                    correlation_id=exc.correlation_id,
+                    responder=session.actor.id,
+                    expires_at=self._confirm_expires_at(),
+                    payload=_confirm_interrupt_payload(session, exc),
+                )
+                try:
+                    await self._send_confirm_card(session, exc, expires_at=interrupt.expires_at)
+                except Exception:
+                    await self._interrupt_manager.cancel(
+                        interrupt.correlation_id,
+                        "card_send_failed",
+                        {"approved": False},
+                        responder=session.actor.id,
+                    )
+                    raise
+                reply_text = _confirm_reply_text(exc)
+                suspended = True
+                await self._persist_confirm_suspended_turn(
+                    session,
+                    user_text=normalized_text,
+                    reply_text=reply_text,
+                    actor_id=actor_id,
+                    provider_message_id=provider_message_id,
+                    confirm=exc,
+                    interrupt_expires_at=interrupt.expires_at.isoformat(),
+                )
+                logger.info(
+                    "agent_loop_awaiting_confirm",
+                    extra={
+                        "session_id": session.session_id,
+                        "capability": exc.capability.name,
+                        "correlation_id": exc.correlation_id,
+                    },
+                )
+                return AgentRunResult(reply_text=reply_text, status="awaiting_interaction")
             await self._persist_completed_turn(
                 session,
                 user_text=normalized_text,
@@ -368,6 +484,60 @@ class AgentLoop:
             correlation_id,
             reply,
             responder=responder,
+        )
+
+    async def resolve_confirm_callback(
+        self,
+        correlation_id: str,
+        *,
+        responder: str,
+        approved: bool,
+        callback_payload: Mapping[str, Any] | None = None,
+    ) -> ConfirmCallbackResult:
+        """Resolve a confirm-card callback and execute the deferred tool only on approval."""
+
+        pending = await self._store.get_pending_interaction(correlation_id)
+        if pending is None or pending.status != "pending":
+            raise AgentLoopStateError(f"No pending confirm interaction: {correlation_id}")
+        if pending.kind != "confirm":
+            raise AgentLoopStateError(f"Pending interaction is not confirm: {correlation_id}")
+
+        resolution_payload = {
+            "approved": approved,
+            "callback": _plain_json_object(callback_payload or {}, "callback_payload"),
+        }
+        if not approved:
+            await self._interrupt_manager.cancel(
+                correlation_id,
+                "user_cancelled",
+                resolution_payload,
+                responder=responder,
+            )
+            return ConfirmCallbackResult(correlation_id=correlation_id, status="cancelled")
+
+        await self._interrupt_manager.resolve(
+            correlation_id,
+            resolution_payload,
+            responder=responder,
+        )
+        tool_result = await self._execute_confirmed_tool(pending.payload)
+        await self._store.add_message(
+            session_id=pending.session_id,
+            role="tool",
+            content=tool_result,
+            actor_id=pending.payload.get("capability")
+            if isinstance(pending.payload.get("capability"), str)
+            else None,
+            metadata={
+                "status": "confirm_executed",
+                "kind": "confirm",
+                "correlation_id": correlation_id,
+            },
+        )
+        return ConfirmCallbackResult(
+            correlation_id=correlation_id,
+            status="confirmed",
+            tool_result=tool_result,
         )
 
     async def _persist_completed_turn(
@@ -431,6 +601,42 @@ class AgentLoop:
                 "pending_nonce": consent.pending.nonce,
                 "expires_at": interrupt_expires_at,
                 "reason": consent.reason,
+            },
+        )
+
+    async def _persist_confirm_suspended_turn(
+        self,
+        session: Session,
+        *,
+        user_text: str,
+        reply_text: str,
+        actor_id: str | None,
+        provider_message_id: str | None,
+        confirm: AgentLoopConfirmRequired,
+        interrupt_expires_at: str,
+    ) -> None:
+        await self._store.add_message(
+            session_id=session.session_id,
+            role="user",
+            content=user_text,
+            actor_id=actor_id or session.actor.id,
+            provider_message_id=provider_message_id,
+            metadata={"source": "dingtalk"},
+        )
+        await self._store.add_message(
+            session_id=session.session_id,
+            role="assistant",
+            content=reply_text,
+            actor_id=session.bot.id,
+            metadata={
+                "status": "awaiting_interaction",
+                "kind": "confirm",
+                "capability": confirm.capability.name,
+                "tool_use_id": confirm.tool_use.id,
+                "correlation_id": confirm.correlation_id,
+                "action": confirm.action,
+                "details": dict(confirm.details),
+                "expires_at": interrupt_expires_at,
             },
         )
 
@@ -511,6 +717,8 @@ class AgentLoop:
             }
         except AgentLoopConsentRequired:
             raise
+        except AgentLoopConfirmRequired:
+            raise
         except Exception as exc:
             logger.exception(
                 "agent_loop_tool_execution_failed",
@@ -552,6 +760,11 @@ class AgentLoop:
             tool_use.arguments,
             services=self._capability_services,
             credentials=credentials,
+            confirmation=_RequestingCapabilityConfirmation(
+                correlation_id=self._confirm_id_factory(),
+                capability=capability,
+                tool_use=tool_use,
+            ),
         )
 
     async def _credential_context_for_capability(
@@ -592,6 +805,80 @@ class AgentLoop:
             else:
                 raise AgentLoopToolError("Authorizer returned an unsupported resolution")
         return CredentialContext.for_session(session, handles=handles)
+
+    async def _execute_confirmed_tool(self, payload: Mapping[str, Any]) -> str:
+        session = await self._session_from_confirm_payload(payload)
+        capability_name = _non_empty_string(payload.get("capability"), "confirm.capability")
+        tool_use = ToolUseRequest(
+            id=_non_empty_string(payload.get("tool_use_id"), "confirm.tool_use_id"),
+            name=capability_name,
+            arguments=_plain_json_object(
+                _mapping_value(payload, "arguments"),
+                "confirm.arguments",
+            ),
+        )
+        capabilities = {
+            capability.name: capability for capability in self._visible_capabilities(session)
+        }
+        capability = capabilities.get(capability_name)
+        if capability is None:
+            raise AgentLoopToolError(f"Confirmed tool is no longer available: {capability_name}")
+        credentials = await self._credential_context_for_capability(session, capability, tool_use)
+        result = await _execute_capability_handler(
+            session,
+            capability,
+            tool_use.arguments,
+            services=self._capability_services,
+            credentials=credentials,
+            confirmation=_ApprovedCapabilityConfirmation(
+                action=_non_empty_string(payload.get("action"), "confirm.action"),
+                details=_plain_json_object(_mapping_value(payload, "details"), "confirm.details"),
+            ),
+        )
+        return result if result.strip() else "confirmed tool completed"
+
+    async def _session_from_confirm_payload(self, payload: Mapping[str, Any]) -> Session:
+        session_id = _non_empty_string(payload.get("session_id"), "confirm.session_id")
+        record = await self._store.get_session(session_id)
+        if record is None:
+            raise AgentLoopStateError(f"Confirmed Session no longer exists: {session_id}")
+        actor_id = _non_empty_string(record.actor_id, "session.actor_id")
+        return Session(
+            session_id=record.session_id,
+            conversation_id=record.conversation_id,
+            kind=record.kind,
+            bot=_bot_identity(record.bot_id),
+            principal=_principal(record.kind, record.principal_id),
+            actor=_actor(actor_id),
+            context=record.context,
+            state=record.state,
+            lifecycle=record.lifecycle,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+
+    async def _send_confirm_card(
+        self,
+        session: Session,
+        confirm: AgentLoopConfirmRequired,
+        *,
+        expires_at: datetime,
+    ) -> None:
+        if self._confirm_card_sender is None:
+            raise CapabilityServiceError("Confirm card sender is not configured")
+        await self._confirm_card_sender.send_confirm_card(
+            conversation_type=1 if session.kind == "dm" else 2,
+            conversation_id=session.conversation_id,
+            open_conversation_id=_session_open_conversation_id(session),
+            responder_user_id=session.actor.id,
+            action=confirm.action,
+            details=confirm.details,
+            correlation_id=confirm.correlation_id,
+            expires_at=expires_at,
+        )
+
+    def _confirm_expires_at(self) -> datetime:
+        return _to_utc(self._now_factory()) + timedelta(seconds=self._confirm_timeout_seconds)
 
     async def _set_session_state(
         self,
@@ -686,6 +973,7 @@ async def _execute_capability_handler(
     *,
     services: Mapping[str, object],
     credentials: CredentialContext,
+    confirmation: CapabilityConfirmation,
 ) -> str:
     if capability.handler is None:
         raise AgentLoopToolError(f"Capability has no handler: {capability.name}")
@@ -695,11 +983,49 @@ async def _execute_capability_handler(
         capability=capability,
         services=services,
         credentials=credentials,
+        confirmation=confirmation,
     )
     result = capability.handler(context, **dict(arguments))
     if inspect.isawaitable(result):
         result = await result
     return _tool_result_text(result)
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestingCapabilityConfirmation:
+    correlation_id: str
+    capability: Capability
+    tool_use: ToolUseRequest
+
+    async def confirm(self, action: str, details: Mapping[str, Any]) -> bool:
+        raise AgentLoopConfirmRequired(
+            correlation_id=self.correlation_id,
+            action=_non_empty_string(action, "confirm.action"),
+            details=_plain_json_object(details, "confirm.details"),
+            capability=self.capability,
+            tool_use=self.tool_use,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ApprovedCapabilityConfirmation:
+    action: str
+    details: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "action", _non_empty_string(self.action, "confirm.action"))
+        object.__setattr__(
+            self,
+            "details",
+            _plain_json_object(self.details, "confirm.details"),
+        )
+
+    async def confirm(self, action: str, details: Mapping[str, Any]) -> bool:
+        normalized_action = _non_empty_string(action, "confirm.action")
+        normalized_details = _plain_json_object(details, "confirm.details")
+        if normalized_action != self.action or normalized_details != self.details:
+            raise AgentLoopToolError("Confirmed tool changed its requested action details")
+        return True
 
 
 def _tool_result_text(value: Any) -> str:
@@ -732,6 +1058,59 @@ def _consent_interrupt_payload(exc: AgentLoopConsentRequired) -> dict[str, Any]:
         "url": exc.consent.url,
         "reason": exc.consent.reason,
     }
+
+
+def _confirm_reply_text(confirm: AgentLoopConfirmRequired) -> str:
+    return f"请在钉钉确认卡片中确认是否执行：{confirm.action}"
+
+
+def _confirm_interrupt_payload(session: Session, exc: AgentLoopConfirmRequired) -> dict[str, Any]:
+    return {
+        "capability": exc.capability.name,
+        "tool_use_id": exc.tool_use.id,
+        "arguments": _plain_json_object(exc.tool_use.arguments, "tool_use.arguments"),
+        "action": exc.action,
+        "details": dict(exc.details),
+        "session_id": session.session_id,
+    }
+
+
+def _mapping_value(values: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = values.get(key)
+    if not isinstance(value, Mapping):
+        raise AgentLoopToolError(f"Confirm payload field must be an object: {key}")
+    return value
+
+
+def _session_open_conversation_id(session: Session) -> str | None:
+    value = session.context.get("open_conversation_id")
+    if isinstance(value, str) and value.strip() != "":
+        return value.strip()
+    return session.conversation_id if session.kind == "dm" else None
+
+
+def _bot_identity(bot_id: str) -> BotIdentity:
+    return BotIdentity(id=_non_empty_string(bot_id, "bot_id"))
+
+
+def _principal(kind: str, principal_id: str) -> Principal:
+    principal_kind = "group" if kind == "group" else "user"
+    return Principal(kind=principal_kind, id=_non_empty_string(principal_id, "principal_id"))
+
+
+def _actor(actor_id: str) -> Actor:
+    normalized = _non_empty_string(actor_id, "actor_id")
+    return Actor(id=normalized, display_name=normalized)
+
+
+def _default_confirm_id() -> str:
+    return f"confirm_{secrets.token_urlsafe(24)}"
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _plain_json_object(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:

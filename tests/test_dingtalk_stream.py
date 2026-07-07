@@ -6,14 +6,22 @@ import logging
 from typing import ClassVar
 
 import pytest
-from dingtalk_stream import AckMessage, CallbackMessage, ChatbotHandler, ChatbotMessage
+from dingtalk_stream import (
+    AckMessage,
+    CallbackMessage,
+    Card_Callback_Router_Topic,
+    ChatbotHandler,
+    ChatbotMessage,
+)
 from dingtalk_stream import Credential as StreamCredential
 
 from src.adapters.dingtalk.message import (
+    CardCallbackEvent,
     InboundEvent,
     InboundMessage,
     MessageNormalizationError,
     UnsupportedInboundMessage,
+    normalize_card_callback,
     normalize_chatbot_callback,
     normalize_chatbot_event,
 )
@@ -51,6 +59,20 @@ def _callback(payload: dict[str, object] | None = None) -> CallbackMessage:
     message = CallbackMessage()
     message.data = _payload() if payload is None else payload
     return message
+
+
+def _card_callback_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "outTrackId": " confirm-1 ",
+        "userId": " user-1 ",
+        "content": (
+            '{"value":"{\\"correlation_id\\":\\"confirm-1\\",\\"decision\\":\\"confirm\\"}"}'
+        ),
+        "extension": "{}",
+        "corpId": "corp-1",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def test_normalize_chatbot_callback_returns_inbound_message() -> None:
@@ -117,6 +139,39 @@ def test_normalize_chatbot_event_returns_unsupported_non_text_metadata() -> None
     )
 
 
+def test_normalize_card_callback_extracts_confirm_decision() -> None:
+    callback = normalize_card_callback(_card_callback_payload())
+
+    assert callback == CardCallbackEvent(
+        correlation_id="confirm-1",
+        responder_id="user-1",
+        decision="confirm",
+        card_instance_id="confirm-1",
+        raw={
+            "outTrackId": " confirm-1 ",
+            "userId": " user-1 ",
+            "content": (
+                '{"value":"{\\"correlation_id\\":\\"confirm-1\\",\\"decision\\":\\"confirm\\"}"}'
+            ),
+            "extension": "{}",
+            "corpId": "corp-1",
+        },
+    )
+
+
+def test_normalize_card_callback_extracts_cancel_from_extension() -> None:
+    callback = normalize_card_callback(
+        _card_callback_payload(
+            content={"extension": {"correlationId": "confirm-2", "decision": "cancel"}},
+            outTrackId="card-2",
+        )
+    )
+
+    assert callback.correlation_id == "confirm-2"
+    assert callback.card_instance_id == "card-2"
+    assert callback.decision == "cancel"
+
+
 @pytest.mark.asyncio
 async def test_stream_adapter_registers_chatbot_topic_and_dispatches_message(
     caplog: pytest.LogCaptureFixture,
@@ -155,6 +210,42 @@ async def test_stream_adapter_registers_chatbot_topic_and_dispatches_message(
         and record.open_conversation_id == "open-conversation-1"
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_adapter_registers_and_dispatches_card_callbacks() -> None:
+    received_messages: list[InboundEvent] = []
+    received_cards: list[CardCallbackEvent] = []
+
+    async def on_message(message: InboundEvent) -> None:
+        received_messages.append(message)
+
+    async def on_card_callback(callback: CardCallbackEvent) -> None:
+        received_cards.append(callback)
+
+    adapter = DingTalkStreamAdapter(
+        _config(),
+        on_message,
+        on_card_callback=on_card_callback,
+        client_factory=FakeStreamClient,
+    )
+    client = adapter.create_client()
+    handler = client.handlers[Card_Callback_Router_Topic]
+
+    code, message = await handler.process(_callback(_card_callback_payload()))
+
+    assert code == AckMessage.STATUS_OK
+    assert message == "ok"
+    assert received_messages == []
+    assert received_cards == [
+        CardCallbackEvent(
+            correlation_id="confirm-1",
+            responder_id="user-1",
+            decision="confirm",
+            card_instance_id="confirm-1",
+            raw=_card_callback_payload(),
+        )
+    ]
 
 
 @pytest.mark.asyncio

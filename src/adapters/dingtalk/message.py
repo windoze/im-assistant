@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-from dingtalk_stream import CallbackMessage, ChatbotMessage
+from dingtalk_stream import CallbackMessage, CardCallbackMessage, ChatbotMessage
 
 
 class MessageNormalizationError(ValueError):
@@ -46,6 +46,18 @@ class UnsupportedInboundMessage:
 
 
 InboundEvent = InboundMessage | UnsupportedInboundMessage
+CardDecision = Literal["confirm", "cancel"]
+
+
+@dataclass(frozen=True, slots=True)
+class CardCallbackEvent:
+    """Normalized DingTalk interactive-card button callback."""
+
+    correlation_id: str
+    responder_id: str
+    decision: CardDecision
+    card_instance_id: str
+    raw: Mapping[str, Any]
 
 
 def normalize_chatbot_callback(
@@ -64,6 +76,42 @@ def normalize_chatbot_event(
 
     chatbot_message = _coerce_chatbot_message(source)
     return normalize_chatbot_message_event(chatbot_message)
+
+
+def normalize_card_callback(
+    source: CallbackMessage | CardCallbackMessage | Mapping[str, Any],
+) -> CardCallbackEvent:
+    """Convert a DingTalk card callback into a stable interaction decision."""
+
+    payload = _coerce_card_callback_payload(source)
+    content = _json_mapping(payload.get("content"), "content")
+    top_extension = _json_mapping(payload.get("extension"), "extension")
+    content_extension = _json_mapping(content.get("extension"), "content.extension")
+    value = _json_mapping(content.get("value"), "content.value")
+    callback_data = {
+        **top_extension,
+        **content_extension,
+        **value,
+        **{
+            key: nested_value
+            for key, nested_value in content.items()
+            if isinstance(key, str) and key not in {"extension", "value"}
+        },
+    }
+    correlation_id = _first_string(
+        callback_data,
+        ("correlation_id", "correlationId"),
+    ) or _required_string(payload.get("outTrackId"), "outTrackId")
+    decision = _card_decision(
+        _first_string(callback_data, ("decision", "action", "actionValue", "value"))
+    )
+    return CardCallbackEvent(
+        correlation_id=correlation_id,
+        responder_id=_required_string(payload.get("userId"), "userId"),
+        decision=decision,
+        card_instance_id=_required_string(payload.get("outTrackId"), "outTrackId"),
+        raw=_plain_json_object(payload, "card_callback"),
+    )
 
 
 def normalize_chatbot_message(message: ChatbotMessage) -> InboundMessage:
@@ -138,6 +186,30 @@ def _coerce_chatbot_message(
     )
 
 
+def _coerce_card_callback_payload(
+    source: CallbackMessage | CardCallbackMessage | Mapping[str, Any],
+) -> dict[str, Any]:
+    if isinstance(source, CardCallbackMessage):
+        return _card_callback_message_payload(source)
+    if isinstance(source, CallbackMessage):
+        return _extract_card_mapping_payload(source.data)
+    if isinstance(source, Mapping):
+        return _extract_card_mapping_payload(source)
+    raise MessageNormalizationError(
+        f"Unsupported DingTalk card callback source: {type(source).__name__}"
+    )
+
+
+def _card_callback_message_payload(message: CardCallbackMessage) -> dict[str, Any]:
+    return {
+        "extension": dict(getattr(message, "extension", {}) or {}),
+        "corpId": getattr(message, "corp_id", ""),
+        "userId": getattr(message, "user_id", ""),
+        "content": dict(getattr(message, "content", {}) or {}),
+        "outTrackId": getattr(message, "card_instance_id", ""),
+    }
+
+
 def _chatbot_message_from_payload(payload: Mapping[str, Any]) -> ChatbotMessage:
     try:
         return ChatbotMessage.from_dict(dict(payload))
@@ -161,6 +233,87 @@ def _extract_mapping_payload(source: Mapping[str, Any]) -> Mapping[str, Any]:
             return parsed
 
     raise MessageNormalizationError("DingTalk callback payload must include chatbot message data")
+
+
+def _extract_card_mapping_payload(source: Mapping[str, Any]) -> dict[str, Any]:
+    if "outTrackId" in source or "userId" in source or "content" in source:
+        return dict(source)
+
+    raw_data = source.get("data")
+    if isinstance(raw_data, Mapping):
+        return dict(raw_data)
+    if isinstance(raw_data, str) and raw_data.strip():
+        try:
+            parsed = json.loads(raw_data)
+        except json.JSONDecodeError as exc:
+            raise MessageNormalizationError(
+                f"Invalid DingTalk card callback data JSON: {exc}"
+            ) from exc
+        if isinstance(parsed, Mapping):
+            return dict(parsed)
+
+    raise MessageNormalizationError("DingTalk card callback payload must include data")
+
+
+def _json_mapping(value: Any, field_name: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return {}
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return {"value": stripped}
+        if isinstance(parsed, Mapping):
+            return dict(parsed)
+        if isinstance(parsed, str):
+            return {"value": parsed}
+    raise MessageNormalizationError(f"DingTalk card callback {field_name} must be JSON object data")
+
+
+def _first_string(values: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = values.get(key)
+        if isinstance(value, str) and value.strip() != "":
+            return value.strip()
+    return None
+
+
+def _card_decision(value: str | None) -> CardDecision:
+    if value is None:
+        raise MessageNormalizationError("DingTalk card callback missing decision")
+    normalized = value.strip().lower()
+    if normalized in {"confirm", "confirmed", "approve", "approved", "ok", "yes"}:
+        return "confirm"
+    if normalized in {"cancel", "cancelled", "canceled", "reject", "rejected", "deny", "no"}:
+        return "cancel"
+    raise MessageNormalizationError(f"Unsupported DingTalk card callback decision: {value}")
+
+
+def _plain_json_object(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise MessageNormalizationError(f"{field_name} must be a mapping")
+    return {
+        _required_string(key, f"{field_name}.key"): _plain_json_value(
+            nested_value,
+            f"{field_name}.{key}",
+        )
+        for key, nested_value in value.items()
+    }
+
+
+def _plain_json_value(value: Any, field_name: str) -> Any:
+    if isinstance(value, Mapping):
+        return _plain_json_object(value, field_name)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_plain_json_value(item, field_name) for item in value]
+    return str(value)
 
 
 def _required_text(message: ChatbotMessage) -> str:

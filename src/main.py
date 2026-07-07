@@ -66,7 +66,12 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
 
     from src.adapters.dingtalk import DingTalkOutbound, DingTalkStreamAdapter
     from src.capabilities import Authorizer, load_capability_registry
-    from src.core import AgentLoop, SessionInboxDispatcher, SessionManager
+    from src.core import (
+        AgentLoop,
+        InteractionCallbackRouter,
+        SessionInboxDispatcher,
+        SessionManager,
+    )
     from src.infra.config import load_config
     from src.infra.dingtalk_client import DingTalkClient
     from src.infra.llm import LLMClient
@@ -127,7 +132,10 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                             },
                         },
                         authorizer=authorizer,
+                        confirm_card_sender=dingtalk_client,
+                        confirm_timeout_seconds=app_config.session.confirm_timeout_sec,
                     )
+                    callback_router = InteractionCallbackRouter(agent_loop)
 
                     async def process_event(event: InboundEvent) -> None:
                         await handle_inbound_event(
@@ -143,7 +151,11 @@ async def main(*, start_stream: bool = False, config: AppConfig | None = None) -
                         await inbox_dispatcher.enqueue(event)
 
                     try:
-                        await DingTalkStreamAdapter(app_config.dingtalk, on_event).start()
+                        await DingTalkStreamAdapter(
+                            app_config.dingtalk,
+                            on_event,
+                            on_card_callback=callback_router.handle_card_callback,
+                        ).start()
                     finally:
                         await inbox_dispatcher.close()
 

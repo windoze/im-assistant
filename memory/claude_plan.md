@@ -11,35 +11,38 @@ I will not record private chain-of-thought, but I will keep this file updated wi
 
 ## Current Task
 
-Selected first incomplete TODO: T27 SessionInterrupt 原语与 AwaitingInteraction.
+Selected first incomplete TODO: T28 confirm 卡片与回调匹配.
 
 Task requirements:
-- Add `core/interrupt.py` with `SessionInterrupt` (`kind`, `payload`, `correlation_id`, `responder`, `expires_at`, `resolve`) and a pending store that can persist pending interaction state.
-- Extend the session state flow so an agent can move `RunningAgent -> AwaitingInteraction -> resume`.
-- Validate creation, suspension, resolution, and restoration behavior with tests.
+- Add `ctx.confirm(action, details)` so sensitive/runtime-controlled tool actions can send a DingTalk interactive card with confirm/cancel buttons.
+- Store an unguessable `correlation_id` in callback data and suspend the session through the existing pending-interaction primitive.
+- Register and normalize DingTalk card callback events, then route callbacks by `correlation_id` plus responder to the pending interaction and resolve it without invoking the LLM.
+- Ensure confirm-card text comes from tool/runtime inputs rather than LLM-generated wording.
+- Validate that a notification-like tool executes only after confirm and does not execute after cancel.
 
 Execution steps:
-1. Inspect existing session, agent loop, store, and tests around `AwaitingInteraction` and pending consent.
-2. Implement interrupt primitives and persistence using existing SQLite/session patterns.
-3. Wire agent loop suspension/resume to use the new primitive without changing M5 confirm-card behavior prematurely.
-4. Add targeted tests for interrupt creation, persisted pending state, resolve, resume, expiry/responder boundaries, plus existing consent flow compatibility.
-5. Run formatting, linting, and tests, then mark T27 done and commit.
+1. Inspect existing interrupt, agent loop, capability context, DingTalk stream/outbound code, and tests.
+2. Design the narrow integration point for `ctx.confirm(...)` using existing service injection and `SessionInterruptManager`.
+3. Add DingTalk interactive-card send/callback support and a deterministic callback router.
+4. Add or update a small confirm-gated tool/test fixture to prove confirm-before-execute and cancel-does-not-execute behavior.
+5. Run formatting, linting, focused tests, then the full test suite.
+6. Mark T28 `[DONE]`, update the completion record, commit all task changes, and stop.
 
 ## Progress Update
 
-Implemented the T27 core shape:
-- Added a persistent `pending_interactions` SQLite table and CRUD methods.
-- Added `src/core/interrupt.py` with `SessionInterrupt`, resolution types, and `SessionInterruptManager`.
-- Wired `AgentLoop` consent suspension through the new interrupt manager and added `resume_interaction(...)`.
-- Added tests for interrupt persistence/resolution and updated store/agent-loop tests.
+Implemented the T28 core flow:
+- Added DingTalk card callback normalization and Stream topic registration.
+- Added OpenAPI confirm-card create/deliver support with callback correlation data.
+- Added `ctx.confirm(action, details)` suspension in `AgentLoop`, plus approved/cancel callback resolution that bypasses the LLM.
+- Added a confirm-gated `send_notification` system capability and targeted tests for approve/cancel behavior.
 
-Next: run formatting/linting/tests, fix any failures, then update TODO.md and commit.
+Focused formatting, linting, and confirm-related tests pass. Next step: update README/TODO, run full validation, and commit.
 
 ## Completion Update
 
-T27 is implemented and documented:
-- TODO.md now marks T27 `[DONE]` with validation notes.
-- README documents persisted pending interactions and `AgentLoop.resume_interaction(...)`.
-- Formatting, linting, focused tests, and the full pytest suite passed after code changes.
+T28 is implemented and documented:
+- TODO.md marks T28 `[DONE]` with completion details.
+- README documents `ctx.confirm(...)`, card callback routing, and the `send_notification` capability.
+- Full formatting, linting, pytest suite, and startup smoke validation passed.
 
-Next: inspect git diff and commit all task-related changes.
+Next: inspect the final diff, commit all invocation changes, and stop.

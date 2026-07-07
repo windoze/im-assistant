@@ -16,6 +16,7 @@ from src.infra.dingtalk_client import (
     DingTalkAPIError,
     DingTalkCalendar,
     DingTalkCalendarEvent,
+    DingTalkCardDelivery,
     DingTalkClient,
     DingTalkDocument,
     DingTalkTodo,
@@ -293,6 +294,69 @@ async def test_send_group_posts_robot_text_message() -> None:
 
     assert payload == {"messageId": "message-1"}
     assert paths == ["/v1.0/oauth2/accessToken", "/v1.0/robot/groupMessages/send"]
+
+
+@pytest.mark.asyncio
+async def test_send_confirm_card_creates_and_delivers_callback_card() -> None:
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1.0/oauth2/accessToken":
+            return httpx.Response(200, json={"accessToken": "app-token", "expireIn": 7200})
+
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        assert request.headers["x-acs-dingtalk-access-token"] == "app-token"
+        if request.url.path == "/v1.0/card/instances":
+            assert body["cardTemplateId"] == "1366a1eb-bc54-4859-ac88-517c56a9acb1.schema"
+            assert body["outTrackId"] == "confirm-1"
+            assert body["callbackType"] == "STREAM"
+            card_data = body["cardData"]["cardParamMap"]
+            assert "发送钉钉通知" in card_data["markdown"]
+            buttons = json.loads(card_data["sys_full_json_obj"])["msgButtons"]
+            assert [button["text"] for button in buttons] == ["确认", "取消"]
+            assert json.loads(buttons[0]["value"]) == {
+                "correlation_id": "confirm-1",
+                "decision": "confirm",
+            }
+            return httpx.Response(200, json={"ok": True})
+
+        assert request.url.path == "/v1.0/card/instances/deliver"
+        assert body == {
+            "outTrackId": "confirm-1",
+            "userIdType": 1,
+            "openSpaceId": "dtv1.card//IM_GROUP.conversation-1",
+            "imGroupOpenDeliverModel": {
+                "robotCode": "robot-code",
+                "recipients": ["user-1"],
+                "extension": {"openConversationId": "open-conversation-1"},
+            },
+        }
+        return httpx.Response(200, json={"delivered": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = DingTalkClient(_config(), http_client=http_client)
+
+        result = await client.send_confirm_card(
+            conversation_type=2,
+            conversation_id="conversation-1",
+            open_conversation_id="open-conversation-1",
+            responder_user_id="user-1",
+            action="发送钉钉通知",
+            details={"content": "hello"},
+            correlation_id="confirm-1",
+            expires_at=datetime(2026, 1, 1, 12, 30, tzinfo=UTC),
+        )
+
+    assert result == DingTalkCardDelivery(
+        card_instance_id="confirm-1",
+        create_payload={"ok": True},
+        deliver_payload={"delivered": True},
+    )
+    assert [path for path, _body in requests] == [
+        "/v1.0/card/instances",
+        "/v1.0/card/instances/deliver",
+    ]
 
 
 @pytest.mark.asyncio

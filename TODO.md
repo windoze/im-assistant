@@ -353,11 +353,18 @@
   - 已补充单测覆盖 interrupt 创建/落盘/重开恢复、responder 不匹配拒绝、resolve 恢复 Idle、过期回复拒绝、AgentLoop consent pending 持久化和 resume 路径;README 已更新运行时说明。
   - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest tests/test_interrupt.py tests/test_store.py tests/test_agent_loop.py -q`、`.venv/bin/pytest -q`。
 
-## T28 `[TODO]` confirm 卡片与回调匹配
+## [DONE] T28 confirm 卡片与回调匹配
 - `ctx.confirm(action, details)`:发钉钉互动卡片(按钮:确认/取消),`correlation_id` 藏卡片回调数据;挂起等回复。
 - `adapters/dingtalk/stream.py`:注册卡片回调事件;`core/router.py` 把卡片回调按 `correlation_id`+responder 匹配到 pending → `resolve()`(绕过 LLM)。
 - 内容来自**工具入参**,非 LLM 措辞(架构 §8.4b 安全属性)。
 - **验收**:一个"发通知"类工具执行前弹确认卡,点确认才执行,点取消则不执行。
+- **完成记录(2026-07-07)**:
+  - 已新增 DingTalk 互动卡片回调归一化与 Stream card callback topic 注册,通过 `correlation_id`、responder 和 confirm/cancel decision 将卡片点击路由到 pending interaction,不进入 LLM。
+  - 已扩展 `DingTalkClient.send_confirm_card(...)`,创建并投放带确认/取消按钮的 MarkdownButton 卡片,按钮 callback value 与 `outTrackId` 携带不可猜测的 `correlation_id`。
+  - 已在 `CapabilityExecutionContext` 增加 `await ctx.confirm(action, details)`,AgentLoop 首次执行时创建 `confirm` interrupt 并挂起 Session;确认回调直接执行挂起的工具,取消回调只将 pending 标记为 cancelled,均绕过 LLM。
+  - 已新增 `send_notification` 系统能力作为验收用通知类工具,确认卡片内容来自规范化工具入参(`content`/target),点击确认才发送钉钉消息,点击取消不发送。
+  - 已补充单测覆盖 interrupt cancel、卡片回调归一化/注册、confirm card OpenAPI 请求体、`ctx.confirm` 挂起、确认后执行、取消不执行和工具注册。
+  - 已验证:`.venv/bin/ruff format .`、`.venv/bin/ruff check .`、`.venv/bin/pytest -q`、`.venv/bin/python -m src.main`。
 
 ## T29 `[TODO]` 取消双来源与系统通告
 - 取消来源(架构 §8.4b):AwaitingInteraction 时收到新消息(`superseded_by_new_message`)/ 30分钟超时(`timeout`)→ `Cancelled`。

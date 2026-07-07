@@ -129,6 +129,51 @@ async def test_interrupt_manager_resolves_for_expected_responder_and_restores_id
 
 
 @pytest.mark.asyncio
+async def test_interrupt_manager_cancels_and_restores_idle(tmp_path) -> None:
+    """Cancel decisions should be persisted without executing the pending interaction."""
+
+    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+    def now_factory() -> datetime:
+        return current_time
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        manager = SessionInterruptManager(store, now_factory=now_factory)
+        await manager.create(
+            session,
+            kind="confirm",
+            correlation_id="confirm-cancel",
+            expires_at=current_time + timedelta(minutes=10),
+            payload={"action": "发送通知"},
+        )
+
+        resolution = await manager.cancel(
+            "confirm-cancel",
+            "user_cancelled",
+            {"approved": False},
+            responder="user-1",
+        )
+        cancelled = await store.get_pending_interaction("confirm-cancel")
+        restored_session = await store.get_session(session.session_id)
+
+    assert resolution.status == "cancelled"
+    assert resolution.reason == "user_cancelled"
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.resolution == {
+        "kind": "confirm",
+        "status": "cancelled",
+        "responder": "user-1",
+        "payload": {"approved": False},
+        "reason": "user_cancelled",
+        "resolved_at": "2026-01-01T12:00:00+00:00",
+    }
+    assert restored_session is not None
+    assert restored_session.state == "Idle"
+
+
+@pytest.mark.asyncio
 async def test_interrupt_resolution_rejects_expired_reply(tmp_path) -> None:
     """A late reply must not resolve or resume an expired interrupt."""
 

@@ -2,6 +2,7 @@
 
 from src.core.agent_loop import (
     AgentLoop,
+    AgentLoopConfirmRequired,
     AgentLoopConsentRequired,
     AgentLoopStateError,
     AgentLoopToolError,
@@ -9,6 +10,7 @@ from src.core.agent_loop import (
     CapabilityAuthorizer,
     CapabilityExecutionContext,
     CapabilityServiceError,
+    ConfirmCallbackResult,
     ToolExecutor,
 )
 from src.core.inbox import InboxEvent, SessionInbox, SessionInboxDispatcher
@@ -21,6 +23,7 @@ from src.core.interrupt import (
     SessionInterruptNotFound,
     SessionInterruptResponderMismatch,
 )
+from src.core.router import CardCallback, ConfirmCallbackResolver, InteractionCallbackRouter
 from src.core.session import Actor, BotIdentity, Principal, Session
 from src.core.session_manager import GROUP_WELCOME_REPLY, SessionManager, SessionRouteResult
 
@@ -28,6 +31,7 @@ __all__ = [
     "Actor",
     "AgentLoop",
     "AgentLoopConsentRequired",
+    "AgentLoopConfirmRequired",
     "AgentLoopStateError",
     "AgentLoopToolError",
     "AgentRunResult",
@@ -35,8 +39,12 @@ __all__ = [
     "CapabilityAuthorizer",
     "CapabilityExecutionContext",
     "CapabilityServiceError",
+    "ConfirmCallbackResult",
+    "CardCallback",
+    "ConfirmCallbackResolver",
     "GROUP_WELCOME_REPLY",
     "InboxEvent",
+    "InteractionCallbackRouter",
     "InterruptResolution",
     "Principal",
     "Session",

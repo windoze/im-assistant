@@ -7,7 +7,9 @@ from typing import Protocol
 
 from dingtalk_stream import (
     AckMessage,
+    CallbackHandler,
     CallbackMessage,
+    Card_Callback_Router_Topic,
     ChatbotHandler,
     ChatbotMessage,
     DingTalkStreamClient,
@@ -15,8 +17,10 @@ from dingtalk_stream import (
 from dingtalk_stream import Credential as StreamCredential
 
 from src.adapters.dingtalk.message import (
+    CardCallbackEvent,
     InboundEvent,
     MessageNormalizationError,
+    normalize_card_callback,
     normalize_chatbot_event,
 )
 from src.infra.config import DingTalkConfig
@@ -25,12 +29,17 @@ from src.infra.log import get_logger
 logger = get_logger(__name__)
 
 OnMessage = Callable[[InboundEvent], Awaitable[None]]
+OnCardCallback = Callable[[CardCallbackEvent], Awaitable[None]]
 
 
 class StreamClient(Protocol):
     """Protocol for SDK-compatible stream clients used by the adapter."""
 
-    def register_callback_handler(self, topic: str, handler: ChatbotHandler) -> None:
+    def register_callback_handler(
+        self,
+        topic: str,
+        handler: ChatbotHandler | CallbackHandler,
+    ) -> None:
         """Register a callback handler for one DingTalk Stream topic."""
 
     async def start(self) -> None:
@@ -48,10 +57,12 @@ class DingTalkStreamAdapter:
         config: DingTalkConfig,
         on_message: OnMessage,
         *,
+        on_card_callback: OnCardCallback | None = None,
         client_factory: StreamClientFactory | None = None,
     ) -> None:
         self._config = config
         self._on_message = on_message
+        self._on_card_callback = on_card_callback
         self._client_factory = client_factory or _default_client_factory
         self.client: StreamClient | None = None
 
@@ -64,6 +75,11 @@ class DingTalkStreamAdapter:
             ChatbotMessage.TOPIC,
             DingTalkChatbotCallbackHandler(self._on_message),
         )
+        if self._on_card_callback is not None:
+            client.register_callback_handler(
+                Card_Callback_Router_Topic,
+                DingTalkCardCallbackHandler(self._on_card_callback),
+            )
         self.client = client
         return client
 
@@ -115,6 +131,47 @@ class DingTalkChatbotCallbackHandler(ChatbotHandler):
                 },
             )
             return AckMessage.STATUS_SYSTEM_EXCEPTION, "on_message failed"
+
+        return AckMessage.STATUS_OK, "ok"
+
+
+class DingTalkCardCallbackHandler(CallbackHandler):
+    """SDK callback handler that normalizes interactive-card button callbacks."""
+
+    def __init__(self, on_card_callback: OnCardCallback) -> None:
+        super().__init__()
+        self._on_card_callback = on_card_callback
+
+    async def process(self, message: CallbackMessage) -> tuple[int, str]:
+        """Normalize, log, and dispatch one DingTalk card callback."""
+
+        try:
+            callback = normalize_card_callback(message)
+        except MessageNormalizationError as exc:
+            logger.warning("dingtalk_card_callback_invalid", extra={"error": str(exc)})
+            return AckMessage.STATUS_BAD_REQUEST, str(exc)
+
+        logger.info(
+            "dingtalk_card_callback",
+            extra={
+                "correlation_id": callback.correlation_id,
+                "responder_id": callback.responder_id,
+                "decision": callback.decision,
+                "card_instance_id": callback.card_instance_id,
+            },
+        )
+
+        try:
+            await self._on_card_callback(callback)
+        except Exception:
+            logger.exception(
+                "dingtalk_on_card_callback_failed",
+                extra={
+                    "correlation_id": callback.correlation_id,
+                    "responder_id": callback.responder_id,
+                },
+            )
+            return AckMessage.STATUS_SYSTEM_EXCEPTION, "on_card_callback failed"
 
         return AckMessage.STATUS_OK, "ok"
 

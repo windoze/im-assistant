@@ -77,9 +77,17 @@ and the bot replies with the authorization link.
 
 `src.core.interrupt.SessionInterruptManager` persists out-of-band `consent` and `confirm`
 interactions in `pending_interactions` with a `correlation_id`, expected responder, payload, and
-expiry. Resolving an interrupt validates the responder, marks the pending row resolved, clears the
-Session's `pending_interaction` context, and restores the Session to `Idle`; `AgentLoop` exposes this
-through `resume_interaction(...)` for OAuth/callback routing.
+expiry. Resolving or cancelling an interrupt validates the responder, marks the pending row terminal,
+clears the Session's `pending_interaction` context, and restores the Session to `Idle`; `AgentLoop`
+exposes this through `resume_interaction(...)` for OAuth/callback routing.
+
+Capability handlers can call `await context.confirm(action, details)` before sensitive side effects.
+The agent loop stores a `confirm` interrupt, sends a DingTalk interactive card with confirm/cancel
+buttons, and returns without running the tool. DingTalk card callbacks are registered on the Stream
+card callback topic, normalized by `normalize_card_callback(...)`, and routed by
+`InteractionCallbackRouter` using the callback `correlation_id` plus responder. Confirm executes the
+deferred tool directly without another LLM roundtrip; cancel resolves the pending interaction without
+running the tool.
 
 Capabilities are declared with `src.capabilities.Capability` and optional `Requirement` metadata.
 The registry loads Python modules from `src/capabilities/system/`, `src/capabilities/base/`, and
@@ -105,6 +113,7 @@ one DM-only calendar tool that uses OBO authorization:
 | `contact_lookup` | Look up DingTalk contacts by userId or display name. | Uses the contact APIs from the OpenAPI client. |
 | `create_doc` | Create a DingTalk document and append text content. | For group use, add `create_doc` to `capabilities.channel_enabled.<openConversationId>`. Configure `dingtalk.document.parent_object_type` and `dingtalk.document.parent_object_id`, or provide those fields as tool input. |
 | `create_todo` | Create a DingTalk todo task for the current actor or a specified assignee. | Resolves userId to unionId through the contact API, then calls the todo API with the app token. |
+| `send_notification` | Send a DingTalk notification after an explicit confirm-card approval. | Calls `context.confirm("发送钉钉通知", details)` before sending; cancel callbacks do not send. For group use, add `send_notification` to `capabilities.channel_enabled.<openConversationId>`. |
 | `schedule_summary` | Summarize the current DM actor's DingTalk calendar for today. | Requires `calendar:read` OBO consent, reads `/v1.0/calendar/primary` and `/v1.0/calendar/users/me/calendars/<calendarId>/events` with the user token, then asks Claude to summarize the events. |
 
 Run tests:

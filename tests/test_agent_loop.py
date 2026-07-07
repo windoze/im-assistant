@@ -20,6 +20,7 @@ from src.capabilities import (
     Requirement,
 )
 from src.capabilities.system.schedule_summary import CAPABILITY as SCHEDULE_SUMMARY
+from src.capabilities.system.send_notification import CAPABILITY as SEND_NOTIFICATION
 from src.core import (
     Actor,
     AgentLoop,
@@ -280,6 +281,163 @@ async def test_agent_loop_injects_capability_services(tmp_path) -> None:
         "additionalProperties": True,
     }
     json.dumps(llm_client.calls[0]["tools"])
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_suspends_confirm_tool_and_executes_after_approval(tmp_path) -> None:
+    """A tool using ctx.confirm should send a card and run only after approval callback."""
+
+    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    llm_client = ToolCallingCompleter(
+        [
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu-notify",
+                    "name": "send_notification",
+                    "input": {"content": "请大家 3 点开会"},
+                }
+            ]
+        ]
+    )
+    dingtalk_client = FakeNotificationDingTalkClient()
+    confirm_sender = FakeConfirmCardSender()
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=CapabilityRegistry([SEND_NOTIFICATION]),
+            capability_services={"dingtalk_client": dingtalk_client},
+            confirm_card_sender=confirm_sender,
+            confirm_id_factory=lambda: "confirm-1",
+            confirm_timeout_seconds=60,
+            now_factory=lambda: current_time,
+        )
+
+        result = await agent_loop.run(
+            session,
+            "帮我发通知",
+            actor_id="user-1",
+            provider_message_id="msg-confirm",
+        )
+        pending = await store.get_pending_interaction("confirm-1")
+        awaiting_session = await store.get_session(session.session_id)
+        suspended_messages = await store.list_messages(session.session_id)
+        callback_result = await agent_loop.resolve_confirm_callback(
+            "confirm-1",
+            responder="user-1",
+            approved=True,
+            callback_payload={"decision": "confirm"},
+        )
+        resolved_pending = await store.get_pending_interaction("confirm-1")
+        restored_session = await store.get_session(session.session_id)
+        messages_after_callback = await store.list_messages(session.session_id)
+
+    assert result.status == "awaiting_interaction"
+    assert "发送钉钉通知" in result.reply_text
+    assert confirm_sender.calls == [
+        {
+            "conversation_type": 1,
+            "conversation_id": "conversation-1",
+            "open_conversation_id": "conversation-1",
+            "responder_user_id": "user-1",
+            "action": "发送钉钉通知",
+            "details": {"target": "user:user-1", "content": "请大家 3 点开会"},
+            "correlation_id": "confirm-1",
+            "expires_at": datetime(2026, 1, 1, 12, 1, tzinfo=UTC),
+        }
+    ]
+    assert dingtalk_client.calls == [("send_oto", ["user-1"], "请大家 3 点开会")]
+    assert pending is not None
+    assert pending.kind == "confirm"
+    assert pending.payload == {
+        "capability": "send_notification",
+        "tool_use_id": "toolu-notify",
+        "arguments": {"content": "请大家 3 点开会"},
+        "action": "发送钉钉通知",
+        "details": {"target": "user:user-1", "content": "请大家 3 点开会"},
+        "session_id": session.session_id,
+    }
+    assert awaiting_session is not None
+    assert awaiting_session.state == "AwaitingInteraction"
+    assert [(message.role, message.content) for message in suspended_messages] == [
+        ("user", "帮我发通知"),
+        ("assistant", result.reply_text),
+    ]
+    assert callback_result.status == "confirmed"
+    assert callback_result.tool_result is not None
+    assert json.loads(callback_result.tool_result)["sent"] is True
+    assert resolved_pending is not None
+    assert resolved_pending.status == "resolved"
+    assert restored_session is not None
+    assert restored_session.state == "Idle"
+    assert len(llm_client.calls) == 1
+    assert [
+        (message.role, message.metadata.get("status")) for message in messages_after_callback
+    ] == [
+        ("user", None),
+        ("assistant", "awaiting_interaction"),
+        ("tool", "confirm_executed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_cancel_confirm_callback_does_not_execute_tool(tmp_path) -> None:
+    """A cancel card callback should terminally cancel the pending tool without side effects."""
+
+    current_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    llm_client = ToolCallingCompleter(
+        [
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu-notify",
+                    "name": "send_notification",
+                    "input": {"content": "不要发送"},
+                }
+            ]
+        ]
+    )
+    dingtalk_client = FakeNotificationDingTalkClient()
+
+    async with SQLiteStore(tmp_path / "assistant.db") as store:
+        session = await _stored_session(store)
+        agent_loop = AgentLoop(
+            store,
+            llm_client,
+            system_prompt="system prompt",
+            capability_registry=CapabilityRegistry([SEND_NOTIFICATION]),
+            capability_services={"dingtalk_client": dingtalk_client},
+            confirm_card_sender=FakeConfirmCardSender(),
+            confirm_id_factory=lambda: "confirm-cancel",
+            now_factory=lambda: current_time,
+        )
+
+        await agent_loop.run(session, "发通知")
+        callback_result = await agent_loop.resolve_confirm_callback(
+            "confirm-cancel",
+            responder="user-1",
+            approved=False,
+            callback_payload={"decision": "cancel"},
+        )
+        cancelled = await store.get_pending_interaction("confirm-cancel")
+        restored_session = await store.get_session(session.session_id)
+        messages = await store.list_messages(session.session_id)
+
+    assert callback_result.status == "cancelled"
+    assert callback_result.tool_result is None
+    assert dingtalk_client.calls == []
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.resolution is not None
+    assert cancelled.resolution["reason"] == "user_cancelled"
+    assert restored_session is not None
+    assert restored_session.state == "Idle"
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert len(llm_client.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -846,6 +1004,32 @@ class FakeAuthorizer:
             )
         )
         return self._resolution
+
+
+class FakeConfirmCardSender:
+    """Fake confirm-card sender that records card delivery requests."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def send_confirm_card(self, **kwargs: Any) -> dict[str, str]:
+        self.calls.append(dict(kwargs))
+        return {"card_instance_id": kwargs["correlation_id"]}
+
+
+class FakeNotificationDingTalkClient:
+    """Fake DingTalk sender for confirm-gated notification tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def send_oto(self, user_ids: list[str], text: str) -> dict[str, str]:
+        self.calls.append(("send_oto", list(user_ids), text))
+        return {"messageId": "oto-message"}
+
+    async def send_group(self, open_conversation_id: str, text: str) -> dict[str, str]:
+        self.calls.append(("send_group", open_conversation_id, text))
+        return {"messageId": "group-message"}
 
 
 @dataclass(frozen=True, slots=True)

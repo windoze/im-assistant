@@ -29,6 +29,12 @@ class DingTalkAppClient(Protocol):
     async def create_todo(self, **kwargs: Any) -> Any:
         """Create one DingTalk todo task."""
 
+    async def send_oto(self, user_ids: list[str], text: str) -> Any:
+        """Send a robot text message to one or more users."""
+
+    async def send_group(self, open_conversation_id: str, text: str) -> Any:
+        """Send a robot text message to a group conversation."""
+
     async def get_primary_calendar(self, *, use_user_token: str) -> Any:
         """Return the current user's primary DingTalk calendar."""
 

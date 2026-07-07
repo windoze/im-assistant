@@ -29,12 +29,15 @@ DOCUMENT_CONTENT_BLOCKS_PATH_TEMPLATE = "/v1.0/documents/{doc_id}/contentBlocks"
 TODO_CREATE_PATH_TEMPLATE = "/v1.0/todo/users/{union_id}/tasks"
 CALENDAR_PRIMARY_PATH = "/v1.0/calendar/primary"
 CALENDAR_EVENTS_PATH_TEMPLATE = "/v1.0/calendar/users/{user_id}/calendars/{calendar_id}/events"
+CARD_INSTANCE_CREATE_PATH = "/v1.0/card/instances"
+CARD_INSTANCE_DELIVER_PATH = "/v1.0/card/instances/deliver"
 TOKEN_HEADER = "x-acs-dingtalk-access-token"
 TOKEN_REFRESH_SKEW_SECONDS = 300
 DEFAULT_TIMEOUT_SECONDS = 10.0
 DEFAULT_CONTACT_DEPARTMENT_ID = "1"
 MAX_CONTACT_PAGE_SIZE = 100
 TEXT_MESSAGE_KEY = "sampleText"
+MARKDOWN_BUTTON_CARD_TEMPLATE_ID = "1366a1eb-bc54-4859-ac88-517c56a9acb1.schema"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,15 @@ class DingTalkTodo:
 
     task_id: str
     raw: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DingTalkCardDelivery:
+    """DingTalk interactive-card create and deliver result."""
+
+    card_instance_id: str
+    create_payload: Any
+    deliver_payload: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +296,80 @@ class DingTalkClient:
             "msgParam": _text_msg_param(text),
         }
         return await self.api_post(GROUP_MESSAGE_PATH, request_body)
+
+    async def send_confirm_card(
+        self,
+        *,
+        conversation_type: int,
+        conversation_id: str,
+        responder_user_id: str,
+        action: str,
+        details: Mapping[str, Any],
+        correlation_id: str,
+        open_conversation_id: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> DingTalkCardDelivery:
+        """Create and deliver an interactive confirm/cancel card with Stream callbacks."""
+
+        normalized_correlation_id = _non_empty_string(correlation_id, "correlation_id")
+        normalized_action = _non_empty_string(action, "action")
+        normalized_details = _plain_json_object(details, "details")
+        card_data = {
+            "title": "请确认操作",
+            "markdown": _confirm_card_markdown(
+                action=normalized_action,
+                details=normalized_details,
+                expires_at=expires_at,
+            ),
+            "tips": normalized_action,
+            "sys_full_json_obj": json.dumps(
+                {
+                    "msgButtons": [
+                        _confirm_card_button(
+                            text="确认",
+                            color="blue",
+                            correlation_id=normalized_correlation_id,
+                            decision="confirm",
+                        ),
+                        _confirm_card_button(
+                            text="取消",
+                            color="gray",
+                            correlation_id=normalized_correlation_id,
+                            decision="cancel",
+                        ),
+                    ]
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        create_payload = await self.api_post(
+            CARD_INSTANCE_CREATE_PATH,
+            {
+                "cardTemplateId": MARKDOWN_BUTTON_CARD_TEMPLATE_ID,
+                "outTrackId": normalized_correlation_id,
+                "cardData": {"cardParamMap": card_data},
+                "callbackType": "STREAM",
+                "imGroupOpenSpaceModel": {"supportForward": False},
+                "imRobotOpenSpaceModel": {"supportForward": False},
+            },
+        )
+        deliver_payload = await self.api_post(
+            CARD_INSTANCE_DELIVER_PATH,
+            _confirm_card_deliver_body(
+                conversation_type=conversation_type,
+                conversation_id=conversation_id,
+                open_conversation_id=open_conversation_id,
+                responder_user_id=responder_user_id,
+                robot_code=self._config.robot_code,
+                correlation_id=normalized_correlation_id,
+            ),
+        )
+        return DingTalkCardDelivery(
+            card_instance_id=normalized_correlation_id,
+            create_payload=create_payload,
+            deliver_payload=deliver_payload,
+        )
 
     async def get_user_list(
         self,
@@ -702,6 +788,110 @@ def _normalize_union_ids(union_ids: Sequence[str]) -> list[str]:
 def _text_msg_param(text: str) -> str:
     content = _non_empty_string(text, "text")
     return json.dumps({"content": content}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _confirm_card_button(
+    *,
+    text: str,
+    color: str,
+    correlation_id: str,
+    decision: str,
+) -> dict[str, str]:
+    callback_value = json.dumps(
+        {
+            "correlation_id": _non_empty_string(correlation_id, "correlation_id"),
+            "decision": _non_empty_string(decision, "decision"),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    title = _non_empty_string(text, "button_text")
+    return {
+        "text": title,
+        "title": title,
+        "actionType": "callback",
+        "value": callback_value,
+        "color": _non_empty_string(color, "button_color"),
+    }
+
+
+def _confirm_card_markdown(
+    *,
+    action: str,
+    details: Mapping[str, Any],
+    expires_at: datetime | None,
+) -> str:
+    lines = [
+        "### 请确认是否执行该操作",
+        "",
+        f"**操作**：{_non_empty_string(action, 'action')}",
+        "",
+        "**详情**：",
+        "```json",
+        json.dumps(_plain_json_object(details, "details"), ensure_ascii=False, indent=2),
+        "```",
+    ]
+    if expires_at is not None:
+        lines.extend(["", f"**过期时间**：{_to_utc(expires_at).isoformat()}"])
+    return "\n".join(lines)
+
+
+def _confirm_card_deliver_body(
+    *,
+    conversation_type: int,
+    conversation_id: str,
+    open_conversation_id: str | None,
+    responder_user_id: str,
+    robot_code: str,
+    correlation_id: str,
+) -> dict[str, Any]:
+    normalized_conversation_id = _non_empty_string(conversation_id, "conversation_id")
+    normalized_responder = _non_empty_string(responder_user_id, "responder_user_id")
+    body: dict[str, Any] = {
+        "outTrackId": _non_empty_string(correlation_id, "correlation_id"),
+        "userIdType": 1,
+    }
+    if conversation_type == 1:
+        body["openSpaceId"] = f"dtv1.card//IM_ROBOT.{normalized_responder}"
+        body["imRobotOpenDeliverModel"] = {"spaceType": "IM_ROBOT"}
+        return body
+    if conversation_type == 2:
+        body["openSpaceId"] = f"dtv1.card//IM_GROUP.{normalized_conversation_id}"
+        body["imGroupOpenDeliverModel"] = {
+            "robotCode": _non_empty_string(robot_code, "robot_code"),
+            "recipients": [normalized_responder],
+        }
+        if open_conversation_id is not None:
+            body["imGroupOpenDeliverModel"]["extension"] = {
+                "openConversationId": _non_empty_string(
+                    open_conversation_id,
+                    "open_conversation_id",
+                )
+            }
+        return body
+    raise ValueError("conversation_type must be 1 or 2")
+
+
+def _plain_json_object(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be a mapping")
+    return {
+        _non_empty_string(key, f"{field_name}.key"): _plain_json_value(
+            nested_value,
+            f"{field_name}.{key}",
+        )
+        for key, nested_value in value.items()
+    }
+
+
+def _plain_json_value(value: Any, field_name: str) -> Any:
+    if isinstance(value, Mapping):
+        return _plain_json_object(value, field_name)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain_json_value(item, field_name) for item in value]
+    raise ValueError(f"{field_name} must be JSON-compatible")
 
 
 def _normalize_identifier(value: str | int, field_name: str) -> str:

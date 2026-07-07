@@ -20,6 +20,7 @@ from src.capabilities.system.contact_lookup import CAPABILITY as CONTACT_LOOKUP
 from src.capabilities.system.create_doc import CAPABILITY as CREATE_DOC
 from src.capabilities.system.create_todo import CAPABILITY as CREATE_TODO
 from src.capabilities.system.schedule_summary import CAPABILITY as SCHEDULE_SUMMARY
+from src.capabilities.system.send_notification import CAPABILITY as SEND_NOTIFICATION
 from src.core import (
     Actor,
     BotIdentity,
@@ -41,9 +42,13 @@ def test_system_registry_loads_t18_application_tools() -> None:
 
     registry = load_capability_registry()
 
-    assert {"contact_lookup", "create_doc", "create_todo", "schedule_summary"}.issubset(
-        registry.names()
-    )
+    assert {
+        "contact_lookup",
+        "create_doc",
+        "create_todo",
+        "schedule_summary",
+        "send_notification",
+    }.issubset(registry.names())
     create_doc = registry.get("create_doc")
     assert create_doc is not None
     assert create_doc.available_in == ("dm", "group")
@@ -58,6 +63,9 @@ def test_system_registry_loads_t18_application_tools() -> None:
     assert (
         can_use(schedule_summary, "group", Actor(id="user-1", display_name="Alice"), None) is False
     )
+    send_notification = registry.get("send_notification")
+    assert send_notification is not None
+    assert send_notification.sensitivity == "high"
 
 
 @pytest.mark.asyncio
@@ -185,6 +193,24 @@ async def test_create_todo_resolves_actor_union_id_and_creates_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_notification_requires_confirm_before_sending() -> None:
+    """The notification tool should use ctx.confirm before sending through DingTalk."""
+
+    client = FakeDingTalkToolClient()
+    confirmation = FakeConfirmation()
+    context = _context(SEND_NOTIFICATION, client, confirmation=confirmation)
+
+    result = await SEND_NOTIFICATION.handler(context, content="请大家 3 点开会")
+
+    assert confirmation.calls == [
+        ("发送钉钉通知", {"target": "user:user-1", "content": "请大家 3 点开会"})
+    ]
+    assert client.calls == [("send_oto", ["user-1"], "请大家 3 点开会")]
+    assert result["sent"] is True
+    assert result["target"] == {"kind": "user", "id": "user-1", "label": "user:user-1"}
+
+
+@pytest.mark.asyncio
 async def test_schedule_summary_reads_actor_calendar_and_summarizes() -> None:
     """The OBO schedule tool should read `me` calendar events with the granted user token."""
 
@@ -288,6 +314,14 @@ class FakeDingTalkToolClient:
         self.calls.append(("create_todo", kwargs))
         return DingTalkTodo(task_id="task-1", raw={"taskId": "task-1"})
 
+    async def send_oto(self, user_ids: list[str], text: str) -> dict[str, str]:
+        self.calls.append(("send_oto", list(user_ids), text))
+        return {"messageId": "oto-message"}
+
+    async def send_group(self, open_conversation_id: str, text: str) -> dict[str, str]:
+        self.calls.append(("send_group", open_conversation_id, text))
+        return {"messageId": "group-message"}
+
     async def get_primary_calendar(self, *, use_user_token: str) -> DingTalkCalendar:
         self.calls.append(("get_primary_calendar", use_user_token))
         return DingTalkCalendar(
@@ -330,6 +364,17 @@ class FakeScheduleLLM:
         return self._reply
 
 
+class FakeConfirmation:
+    """Fake ctx.confirm implementation for capability unit tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Mapping[str, Any]]] = []
+
+    async def confirm(self, action: str, details: Mapping[str, Any]) -> bool:
+        self.calls.append((action, dict(details)))
+        return True
+
+
 def _context(
     capability: Capability,
     client: FakeDingTalkToolClient,
@@ -337,6 +382,7 @@ def _context(
     document_defaults: Mapping[str, object] | None = None,
     llm_client: object | None = None,
     credentials: CredentialContext | None = None,
+    confirmation: object | None = None,
 ) -> CapabilityExecutionContext:
     services: dict[str, object] = {"dingtalk_client": client}
     if document_defaults is not None:
@@ -348,6 +394,7 @@ def _context(
         capability=capability,
         services=services,
         credentials=credentials,
+        confirmation=confirmation,
     )
 
 

@@ -106,6 +106,27 @@ class SessionInterrupt:
             resolved_at=resolved_at,
         )
 
+    def cancel(
+        self,
+        reason: str,
+        reply: Mapping[str, Any] | None = None,
+        *,
+        responder: str,
+        now: datetime | None = None,
+    ) -> InterruptResolution:
+        """Cancel this interrupt for the expected responder before expiry."""
+
+        normalized = self.resolve(reply, responder=responder, now=now)
+        return InterruptResolution(
+            correlation_id=normalized.correlation_id,
+            kind=normalized.kind,
+            status="cancelled",
+            responder=normalized.responder,
+            payload=normalized.payload,
+            reason=_non_empty_string(reason, "reason"),
+            resolved_at=normalized.resolved_at,
+        )
+
     def to_context(self) -> dict[str, Any]:
         """Return the Session context representation of this pending interrupt."""
 
@@ -241,6 +262,46 @@ class SessionInterruptManager:
             raise SessionInterruptNotFound(f"No active interrupt: {correlation_id}")
         interrupt = _interrupt_from_record(record)
         resolution = interrupt.resolve(
+            reply,
+            responder=responder,
+            now=_to_utc(self._now_factory()),
+        )
+        await self._store.resolve_pending_interaction(
+            interrupt.correlation_id,
+            status=resolution.status,
+            resolution=resolution.to_record_payload(),
+            resolved_at=resolution.resolved_at,
+        )
+        session_record = await self._store.get_session(record.session_id)
+        if session_record is None:
+            raise SessionInterruptError(
+                f"Interrupted Session no longer exists: {record.session_id}"
+            )
+        await self._store.upsert_session(
+            _session_record_from_record(
+                session_record,
+                "Idle",
+                context=_context_without_interrupt(session_record.context),
+            )
+        )
+        return resolution
+
+    async def cancel(
+        self,
+        correlation_id: str,
+        reason: str,
+        reply: Mapping[str, Any] | None = None,
+        *,
+        responder: str,
+    ) -> InterruptResolution:
+        """Cancel a pending interrupt and restore the Session to Idle."""
+
+        record = await self._store.get_pending_interaction(correlation_id)
+        if record is None or record.status != "pending":
+            raise SessionInterruptNotFound(f"No active interrupt: {correlation_id}")
+        interrupt = _interrupt_from_record(record)
+        resolution = interrupt.cancel(
+            reason,
             reply,
             responder=responder,
             now=_to_utc(self._now_factory()),
